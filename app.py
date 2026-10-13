@@ -56,8 +56,14 @@ def dashboard():
         badge_color = "#22c55e" if is_avail else "#ef4444"
         badge_text = "DISPONIBLE ✅" if is_avail else "AGOTADO ❌"
         
-        # Store tag color
-        store_color = "#e11d48" if "ZARA" in store else "#0284c7" if "PULL" in store else "#d97706"
+        store_color = (
+            "#e11d48" if "ZARA" in store
+            else "#0284c7" if "PULL" in store
+            else "#d97706" if "BERSHKA" in store
+            else "#ec4899" if "STRAD" in store
+            else "#f59e0b" if "MANGO" in store
+            else "#dc2626"
+        )
         
         items_html += f"""
         <div class="card">

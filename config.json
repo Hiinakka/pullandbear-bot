@@ -1,5 +1,5 @@
 {
-  "check_interval_seconds": 60,
+  "check_interval_seconds": 5,
   "headless": true,
   "sound_alarm": true,
   "windows_notification": true,

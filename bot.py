@@ -1,9 +1,10 @@
 """
 =============================================================================
-Inditex Multi-Store Restock Bot (Pull&Bear, Zara, Bershka)
-- Tolerancia inteligente a errores tipograficos (pulandbear, berhska, zra...)
-- Flujo conversacional guiado (si te dejas la talla, te la pregunta)
-- Escaneo suave cada 1 minuto (60s)
+Universal Multi-Store Restock Bot
+- Tiendas: Zara, Bershka, Pull&Bear, Stradivarius, Mango, H&M (HyM)
+- Tolerancia inteligente a errores tipográficos (pulandbear, berhska, hym...)
+- Flujo conversacional guiado con detección de tallas
+- Consultas ultra-rápidas configurables (ej: cada 5s o 60s)
 - Soporte multi-usuario completo por Telegram
 =============================================================================
 """
@@ -287,14 +288,19 @@ def handle_telegram_message(token, chat_id, user_name, text):
 
     if cmd_token in ("/start", "/help", "/ayuda", "ayuda", "help"):
         help_msg = (
-            f"👋 <b>¡Hola {user_name}! Soy tu Tracker de Ropa para Zara, Bershka y Pull&Bear.</b>\n\n"
+            f"👋 <b>¡Hola {user_name}! Soy tu Tracker de Ropa Multi-Tienda.</b>\n\n"
+            "🏪 <b>Tiendas soportadas:</b>\n"
+            "Zara, Bershka, Pull&Bear, Stradivarius, Mango y H&M (HyM).\n\n"
             "👗 <b>¿Cómo añadir una alerta?</b>\n"
             "Tienes 3 formas muy sencillas:\n\n"
             "1️⃣ <b>Escribiendo tienda, referencia y talla:</b>\n"
-            "<code>pulandbear 07563305 XS</code>\n"
-            "<code>zara 2731/240 S</code>\n"
-            "<code>bershka 0123/456 M</code>\n"
-            "<i>(¡Corrijo automáticamente faltas como 'pulandbear', 'berhska' o 'zra'!)</i>\n\n"
+            "• <code>pulandbear 07563305 XS</code>\n"
+            "• <code>zara 2731/240 S</code>\n"
+            "• <code>bershka 0123/456 M</code>\n"
+            "• <code>stradivarius 0453/642 36</code>\n"
+            "• <code>mango 37045842 M</code>\n"
+            "• <code>hym 1324742001 S</code>\n"
+            "<i>(¡Corrijo automáticamente faltas como 'pulandbear', 'berhska', 'hym' o 'stradi'!)</i>\n\n"
             "2️⃣ <b>Pegando directamente el enlace de la prenda:</b>\n"
             "<code>https://www.zara.com/es/es/... S</code>\n\n"
             "3️⃣ <b>O déjate guiar:</b>\n"
@@ -311,8 +317,8 @@ def handle_telegram_message(token, chat_id, user_name, text):
         test_msg = (
             "🔔 <b>¡PRUEBA DE FUNCIONAMIENTO EXITOSA!</b> 🔔\n\n"
             "🟢 <b>Estado del bot:</b> 100% Operativo y Conectado\n"
-            "🏪 <b>Tiendas soportadas:</b> Zara, Bershka y Pull&Bear\n"
-            "⏱️ <b>Frecuencia de escaneo:</b> Cada 1 minuto (60s)\n"
+            "🏪 <b>Tiendas soportadas:</b> Pull&Bear, Zara, Bershka, Stradivarius, Mango y H&M\n"
+            "⏱️ <b>Frecuencia de escaneo:</b> Consultas ultra-rápidas activas\n"
             f"📱 <b>Tu ID de usuario:</b> <code>{chat_id}</code>\n\n"
             "🚨 <i>Ejemplo de cómo te llegará una alerta real de compra:</i>\n"
             "Prenda: <b>Cárdigan cremallera Dickies</b>\n"
@@ -480,14 +486,14 @@ def handle_telegram_message(token, chat_id, user_name, text):
 
 def main():
     config = load_config()
-    check_interval = max(30, config.get("check_interval_seconds", 60))
+    check_interval = max(3, config.get("check_interval_seconds", 5))
 
     print("=" * 65)
-    print("      INDITEX RESTOCK ALERT BOT (ZARA, BERSHKA, PULL&BEAR)")
+    print("  UNIVERSAL RESTOCK BOT (ZARA, BERSHKA, P&B, STRADI, MANGO, H&M)")
     print("=" * 65)
-    print("  Tolerancia a errores tipograficos: Activa")
+    print("  Tolerancia a errores tipográficos: Activa")
     print("  Flujo guiado interactivo: Activo")
-    print(f"  Ciclo de escaneo: Cada {check_interval} segundos (~1 minuto)")
+    print(f"  Ciclo de escaneo: Cada {check_interval} segundos")
     print("=" * 65)
 
     threading.Thread(target=telegram_listener_thread, args=(config,), daemon=True).start()
@@ -498,7 +504,7 @@ def main():
             alerts = load_alerts()
             if not alerts:
                 logger.info("No hay prendas en seguimiento en alerts.json. Esperando comandos...")
-                time.sleep(15)
+                time.sleep(10)
                 continue
 
             cycle_start_time = time.time()
@@ -553,10 +559,11 @@ def main():
                 except Exception as e:
                     logger.warning(f"Error comprobando [{store}] {url}: {e}")
 
-                time.sleep(3)
+                if len(alerts) > 1:
+                    time.sleep(1)
 
             elapsed = time.time() - cycle_start_time
-            sleep_needed = max(5, check_interval - elapsed)
+            sleep_needed = max(1, check_interval - elapsed)
             logger.info(f"Ciclo completado en {elapsed:.1f}s. Próxima comprobación en {sleep_needed:.1f}s...")
             time.sleep(sleep_needed)
 

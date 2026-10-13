@@ -1,62 +1,43 @@
 # Inditex Restock Bot 24/7 (Zara, Bershka & Pull&Bear)
 
-Bot especializado para monitorizar reposiciones de stock en tiempo real en las tiendas de **Zara**, **Bershka** y **Pull&Bear**, con notificaciones sonoras directas a tu teléfono móvil por Telegram y panel web en vivo.
+Bot inteligente para monitorizar reposiciones de stock en tiempo real en **Zara**, **Bershka** y **Pull&Bear**, con notificaciones directas a tu móvil por Telegram, tolerancia a fallos tipográficos y flujo conversacional guiado.
 
 ---
 
-## ⚡ Novedades de la versión Multi-Tienda
+## ⚡ Nuevas Funcionalidades Inteligentes
 
-1. **Soporte para 3 marcas de Inditex:** Monitoriza prendas simultáneamente en Zara, Bershka y Pull&Bear.
-2. **Control interactivo por Telegram:** Puedes añadir prendas directamente escribiéndole a tu bot de Telegram sin tener que tocar código ni reiniciar nada.
-3. **Múltiples prendas a la vez:** Vigila el cárdigan Dickies de Pull&Bear y a la vez ropa de Zara o Bershka.
-4. **Enlace directo a compra:** Cada alerta te envía el enlace directo a la prenda para comprarla en 1 segundo.
-
----
-
-## 📱 Comandos del Bot en Telegram (`@PruebaPullBot`)
-
-Puedes hablarle a tu bot en Telegram con estos comandos:
-
-* **Añadir una prenda:**
-  ```text
-  /add <tienda> <referencia o enlace> <talla>
-  ```
-  *Ejemplos:*
-  * `/add pullandbear 07563305 XS`
-  * `/add zara 2731/240 S`
-  * `/add bershka 0123/456 M`
-  * `/add https://www.zara.com/es/es/vestido-satinado-p01234567.html L`
-
-* **Ver prendas activas:**
-  ```text
-  /list
-  ```
-  Te responde con la lista de todas las prendas que está vigilando y su stock actual.
-
-* **Eliminar una alerta:**
-  ```text
-  /del 1
-  ```
-  Elimina la prenda número 1 de tu lista.
-
-* **Probar notificación:**
-  ```text
-  /test
-  ```
-  Envía un aviso de prueba para verificar el sonido en tu smartphone.
+1. **Corrección de errores tipográficos (Fuzzy Matching):**
+   * El bot entiende variaciones y erratas comunes como `pulandbear`, `pullndbear`, `pull&bear`, `berhska`, `berska`, `bsk`, `zra`, etc.
+2. **Flujo interactivo paso a paso:**
+   * Si escribes solo la prenda o pegas un enlace sin indicar la talla, el bot te preguntará amablemente:  
+     *“¿Qué talla estás buscando? (Ej: XS, S, M, L, XL, 38...)”*  
+     y solo tienes que responder con la talla para guardar la alerta.
+3. **Escaneo inteligente cada 1 minuto (60s):**
+   * Tráfico suave y 100% natural para no sobrecargar los servidores de las tiendas y evitar bloqueos.
+4. **Soporte multi-usuario completo:**
+   * Puedes compartir el bot con amigos o familiares: cada uno gestiona sus propias prendas de forma privada. Si varios siguen la misma prenda, el bot solo hace 1 comprobación por minuto y avisa a todos a la vez.
 
 ---
 
-## 🚀 Cómo ejecutarlo
+## 📱 Cómo usar el Bot en Telegram (`@TrackerRopaBot`)
 
-### Opción 1: En tu propio PC
-Haz doble clic en `run_bot.bat` o ejecuta:
-```powershell
-cd C:\Users\ariba\.gemini\antigravity\scratch\pullandbear_bot
-py bot.py
-```
+Puedes hablarle de forma completamente natural:
 
-### Opción 2: 24/7 en GitHub Actions (Nube gratuita)
-1. Haz un commit y `git push origin main`.
-2. En GitHub entra en **Actions** > **Pull&Bear Restock Bot 24/7** > **Run workflow**.
-3. El bot se quedará escuchando en la nube y responderá a tus comandos de Telegram.
+### 1. Añadir una prenda (Todo en un mensaje):
+* `pulandbear 07563305 XS`
+* `zara 2731/240 S`
+* `berhska 0123/456 M`
+* `https://www.zara.com/es/es/... M`
+
+### 2. O déjate guiar (En dos pasos):
+* Escribes: `pulandbear 07563305` o pegas un enlace.
+* El bot te responde: *“¿Qué talla estás buscando?”*
+* Respondes: `XS` (o `la S`, `talla 38`, `mediana`, etc.).
+* El bot confirma y empieza a vigilarla.
+
+### 3. Comandos útiles:
+* `/list` : Ver tus prendas en seguimiento y si están agotadas o disponibles.
+* `/del 1` : Dejar de seguir la prenda número 1 de tu lista.
+* `/prueba` : Probar que recibes avisos y comprobar que todo funciona.
+* `/cancelar` : Cancelar cualquier operación en curso.
+* `/help` : Ver la guía de ayuda.

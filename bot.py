@@ -1,13 +1,16 @@
 """
 =============================================================================
 Inditex Multi-Store Restock Bot (Pull&Bear, Zara, Bershka)
-- Escaneo cada 1 minuto (60s) para evitar sobrecargas.
-- Soporte multi-usuario (hasta 5 o más personas por Telegram).
+- Tolerancia inteligente a errores tipograficos (pulandbear, berhska, zra...)
+- Flujo conversacional guiado (si te dejas la talla, te la pregunta)
+- Escaneo suave cada 1 minuto (60s)
+- Soporte multi-usuario completo por Telegram
 =============================================================================
 """
 
 import sys
 import os
+import re
 import time
 import json
 import logging
@@ -37,6 +40,7 @@ ALERTS_PATH = os.path.join(BASE_DIR, "alerts.json")
 
 ALARM_ACTIVE = False
 LAST_NOTIFIED = {}  # item_id -> timestamp
+USER_STATES = {}    # chat_id -> dict(state, store, ref_or_url, timestamp)
 
 
 def play_sound_alarm():
@@ -98,7 +102,6 @@ def load_alerts():
         try:
             with open(ALERTS_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # Normalize chat_ids format
                 for item in data:
                     if "chat_ids" not in item:
                         item["chat_ids"] = ["1997921776"]
@@ -149,8 +152,39 @@ def create_driver(config):
     return driver
 
 
+def save_new_alert(alerts, store, ref_or_url, size, chat_id):
+    """Helper to register a new alert in alerts.json."""
+    size = store_checker.normalize_size(size)
+    url = store_checker.build_search_or_product_url(store, ref_or_url)
+    
+    # Check if item + size is already tracked
+    for a in alerts:
+        if a.get("store") == store and a.get("size") == size and (a.get("ref") == ref_or_url or a.get("url") == url):
+            if chat_id not in a.get("chat_ids", []):
+                a.setdefault("chat_ids", []).append(chat_id)
+                save_alerts(alerts)
+            return a, False
+
+    new_id = max([a.get("id", 0) for a in alerts], default=0) + 1
+    new_item = {
+        "id": new_id,
+        "store": store,
+        "name": f"Prenda {store.capitalize()}",
+        "url": url,
+        "ref": ref_or_url,
+        "size": size,
+        "status": "Comprobando...",
+        "price": "Consultando...",
+        "chat_ids": [chat_id],
+        "last_checked": None
+    }
+    alerts.append(new_item)
+    save_alerts(alerts)
+    return new_item, True
+
+
 def telegram_listener_thread(config):
-    """Listens for user commands via Telegram bot polling (multi-user support)."""
+    """Listens for user commands via Telegram bot polling."""
     tg = config.get("telegram", {})
     token = tg.get("bot_token")
     if not token or not tg.get("enabled"):
@@ -174,41 +208,122 @@ def telegram_listener_thread(config):
                     text = (msg.get("text") or "").strip()
 
                     if chat_id and text:
-                        handle_telegram_command(token, chat_id, user_name, text)
+                        handle_telegram_message(token, chat_id, user_name, text)
         except Exception as e:
             time.sleep(3)
         time.sleep(1)
 
 
-def handle_telegram_command(token, chat_id, user_name, text):
-    """Processes incoming Telegram bot commands for any user."""
+def handle_telegram_message(token, chat_id, user_name, text):
+    """Conversational command handler with typo tolerance and interactive prompting."""
+    global USER_STATES
+    clean_text = text.strip()
+    lower_text = clean_text.lower()
     alerts = load_alerts()
-    parts = text.split()
-    cmd = parts[0].lower() if parts else ""
 
-    if cmd in ("/start", "/help", "ayuda"):
+    # Cancel command
+    if lower_text in ("/cancel", "/cancelar", "cancelar", "cancel", "salir"):
+        if chat_id in USER_STATES:
+            USER_STATES.pop(chat_id, None)
+            send_telegram(token, chat_id, "❌ Operación cancelada. Escribe <code>/help</code> para ver opciones.")
+        else:
+            send_telegram(token, chat_id, "ℹ️ No había ninguna operación activa que cancelar.")
+        return
+
+    # Check if user is in an active conversational state
+    user_state = USER_STATES.get(chat_id)
+    if user_state:
+        # Timeout states older than 15 minutes
+        if time.time() - user_state.get("timestamp", 0) > 900:
+            USER_STATES.pop(chat_id, None)
+            user_state = None
+
+    if user_state:
+        state_type = user_state.get("state")
+        
+        # State: waiting for size
+        if state_type == "WAITING_FOR_SIZE":
+            chosen_size = store_checker.normalize_size(clean_text)
+            store = user_state["store"]
+            ref_or_url = user_state["ref_or_url"]
+            USER_STATES.pop(chat_id, None)
+
+            item, is_new = save_new_alert(alerts, store, ref_or_url, chosen_size, chat_id)
+            send_telegram(
+                token, chat_id,
+                f"✅ <b>¡Alerta guardada con éxito!</b>\n\n"
+                f"🏪 <b>Tienda:</b> {store.upper()}\n"
+                f"👕 <b>Referencia:</b> <code>{ref_or_url}</code>\n"
+                f"📏 <b>Talla:</b> <b>{chosen_size}</b>\n\n"
+                f"🔔 <i>Te enviaré un aviso con el enlace directo en cuanto haya stock disponible.</i>"
+            )
+            return
+
+        # State: waiting for delete index
+        if state_type == "WAITING_FOR_DELETE":
+            USER_STATES.pop(chat_id, None)
+            user_items = [item for item in alerts if chat_id in item.get("chat_ids", [])]
+            num_match = re.search(r'\d+', clean_text)
+            if num_match:
+                idx = int(num_match.group()) - 1
+                if 0 <= idx < len(user_items):
+                    target_item = user_items[idx]
+                    if chat_id in target_item.get("chat_ids", []):
+                        target_item["chat_ids"].remove(chat_id)
+                    if not target_item.get("chat_ids"):
+                        alerts = [x for x in alerts if x.get("id") != target_item.get("id")]
+                    save_alerts(alerts)
+                    send_telegram(token, chat_id, f"🗑️ Has dejado de seguir: <b>{target_item.get('name', 'Prenda')}</b> (Talla {target_item.get('size')}).")
+                    return
+            send_telegram(token, chat_id, "⚠️ Número no reconocido. Operación cancelada. Consulta tu lista con <code>/list</code>.")
+            return
+
+    # Standard Commands
+    cmd_token = clean_text.split()[0].lower() if clean_text.split() else ""
+
+    if cmd_token in ("/start", "/help", "/ayuda", "ayuda", "help"):
         help_msg = (
-            f"👋 <b>¡Hola {user_name}! Soy tu Bot de Restock para Inditex</b> (Zara, Bershka y Pull&Bear).\n\n"
-            "👗 <b>Comandos disponibles:</b>\n\n"
-            "• <b>Añadir alerta:</b>\n"
-            "<code>/add &lt;tienda&gt; &lt;referencia o enlace&gt; &lt;talla&gt;</code>\n"
-            "<i>Ejemplos:</i>\n"
-            "<code>/add pullandbear 07563305 XS</code>\n"
-            "<code>/add zara 2731/240 S</code>\n"
-            "<code>/add bershka 0123/456 M</code>\n"
-            "<code>/add https://www.zara.com/es/es/... M</code>\n\n"
+            f"👋 <b>¡Hola {user_name}! Soy tu Tracker de Ropa para Zara, Bershka y Pull&Bear.</b>\n\n"
+            "👗 <b>¿Cómo añadir una alerta?</b>\n"
+            "Tienes 3 formas muy sencillas:\n\n"
+            "1️⃣ <b>Escribiendo tienda, referencia y talla:</b>\n"
+            "<code>pulandbear 07563305 XS</code>\n"
+            "<code>zara 2731/240 S</code>\n"
+            "<code>bershka 0123/456 M</code>\n"
+            "<i>(¡Corrijo automáticamente faltas como 'pulandbear', 'berhska' o 'zra'!)</i>\n\n"
+            "2️⃣ <b>Pegando directamente el enlace de la prenda:</b>\n"
+            "<code>https://www.zara.com/es/es/... S</code>\n\n"
+            "3️⃣ <b>O déjate guiar:</b>\n"
+            "Escribe solo la referencia o el enlace, y te preguntaré qué talla quieres.\n\n"
+            "📋 <b>Otros comandos útiles:</b>\n"
             "• <code>/list</code> : Ver tus prendas en seguimiento y su estado.\n"
-            "• <code>/del &lt;número&gt;</code> : Dejar de seguir una prenda (ej: <code>/del 1</code>).\n"
-            "• <code>/prueba</code> o <code>/test</code> : Comprobar que recibes avisos y que todo funciona correctamente."
+            "• <code>/del &lt;número&gt;</code> : Dejar de seguir una prenda.\n"
+            "• <code>/prueba</code> : Enviar una alerta de prueba para verificar tu móvil."
         )
         send_telegram(token, chat_id, help_msg)
+        return
 
-    elif cmd in ("/list", "/status", "lista"):
-        # Filter items where this chat_id is subscribed
+    if cmd_token in ("/prueba", "/test", "prueba", "test"):
+        test_msg = (
+            "🔔 <b>¡PRUEBA DE FUNCIONAMIENTO EXITOSA!</b> 🔔\n\n"
+            "🟢 <b>Estado del bot:</b> 100% Operativo y Conectado\n"
+            "🏪 <b>Tiendas soportadas:</b> Zara, Bershka y Pull&Bear\n"
+            "⏱️ <b>Frecuencia de escaneo:</b> Cada 1 minuto (60s)\n"
+            f"📱 <b>Tu ID de usuario:</b> <code>{chat_id}</code>\n\n"
+            "🚨 <i>Ejemplo de cómo te llegará una alerta real de compra:</i>\n"
+            "Prenda: <b>Cárdigan cremallera Dickies</b>\n"
+            "Talla: <b>XS DISPONIBLE ✅</b>\n"
+            "Precio: <b>45.99 €</b>\n\n"
+            "🛒 <a href='https://www.pullandbear.com/es/cardigan-cremallera-dickies-l07563305?cS=712'><b>PULSA AQUÍ PARA COMPRAR</b></a>\n\n"
+            "✨ <i>Todo funciona de diez. Escribe /list para ver tus prendas o añade una nueva.</i>"
+        )
+        send_telegram(token, chat_id, test_msg)
+        return
+
+    if cmd_token in ("/list", "/status", "lista", "status"):
         user_items = [item for item in alerts if chat_id in item.get("chat_ids", [])]
-
         if not user_items:
-            send_telegram(token, chat_id, "ℹ️ No tienes ninguna prenda en seguimiento todavía.\nAñade una con:\n<code>/add &lt;tienda&gt; &lt;referencia&gt; &lt;talla&gt;</code>")
+            send_telegram(token, chat_id, "ℹ️ No tienes ninguna prenda en seguimiento todavía.\n\nPuedes añadir una escribiendo:\n<code>pulandbear 07563305 XS</code>")
             return
 
         lines = [f"📋 <b>Tus prendas en seguimiento ({len(user_items)}):</b>\n"]
@@ -224,120 +339,139 @@ def handle_telegram_command(token, chat_id, user_name, text):
                 f"<b>{idx}. [{store_name}] {name}</b>\n"
                 f"   Talla: <b>{size}</b> | Estado: {icon}\n"
                 f"   Precio: {price}\n"
-                f"   🔗 <a href='{item.get('url')}'>Ver Prenda</a>\n"
+                f"   🔗 <a href='{item.get('url')}'>Ver en Tienda</a>\n"
             )
-        lines.append("<i>Para borrar una alerta usa /del &lt;número&gt;</i>")
+        lines.append("<i>Para borrar una prenda usa /del &lt;número&gt;</i>")
         send_telegram(token, chat_id, "\n".join(lines))
+        return
 
-    elif cmd in ("/del", "/delete", "/borrar", "/eliminar"):
+    if cmd_token in ("/del", "/delete", "/borrar", "/eliminar"):
         user_items = [item for item in alerts if chat_id in item.get("chat_ids", [])]
-        if len(parts) < 2 or not parts[1].isdigit():
-            send_telegram(token, chat_id, "⚠️ Indica el número de la prenda a eliminar.\nEjemplo: <code>/del 1</code> (consulta tu lista con /list)")
-            return
-        idx = int(parts[1]) - 1
-        if 0 <= idx < len(user_items):
-            target_item = user_items[idx]
-            # Remove chat_id from item's subscribers
-            if chat_id in target_item.get("chat_ids", []):
-                target_item["chat_ids"].remove(chat_id)
-
-            # If no one is following it, remove the item completely
-            if not target_item.get("chat_ids"):
-                alerts = [x for x in alerts if x.get("id") != target_item.get("id")]
-
-            save_alerts(alerts)
-            send_telegram(token, chat_id, f"🗑️ Has dejado de seguir: <b>{target_item.get('name', 'Prenda')}</b> ({target_item.get('size')}).")
-        else:
-            send_telegram(token, chat_id, f"⚠️ Número no válido. Tienes {len(user_items)} prendas en /list.")
-
-    elif cmd in ("/prueba", "/test", "prueba", "test"):
-        test_msg = (
-            "🔔 <b>¡PRUEBA DE FUNCIONAMIENTO EXITOSA!</b> 🔔\n\n"
-            "🟢 <b>Estado del bot:</b> 100% Operativo y Conectado\n"
-            "🏪 <b>Tiendas soportadas:</b> Zara, Bershka y Pull&Bear\n"
-            "⏱️ <b>Frecuencia de escaneo:</b> Cada 1 minuto (60s)\n"
-            f"📱 <b>Tu ID de usuario:</b> <code>{chat_id}</code>\n\n"
-            "🚨 <i>Ejemplo de cómo te llegará una alerta real:</i>\n"
-            "Prenda: <b>Cárdigan cremallera Dickies</b>\n"
-            "Talla: <b>XS DISPONIBLE ✅</b>\n"
-            "Precio: <b>45.99 €</b>\n\n"
-            "🛒 <a href='https://www.pullandbear.com/es/cardigan-cremallera-dickies-l07563305?cS=712'><b>PULSA AQUÍ PARA COMPRAR</b></a>\n\n"
-            "✨ <i>Todo está listo. Escribe /list para ver tus prendas o /add para añadir nuevas.</i>"
-        )
-        send_telegram(token, chat_id, test_msg)
-
-    elif cmd in ("/add", "/alerta", "/crear"):
-        if len(parts) < 3:
-            send_telegram(
-                token, chat_id,
-                "⚠️ <b>Formato incorrecto.</b>\n"
-                "Usa: <code>/add &lt;tienda&gt; &lt;referencia o enlace&gt; &lt;talla&gt;</code>\n\n"
-                "<i>Ejemplo:</i> <code>/add pullandbear 07563305 XS</code>\n"
-                "<i>Ejemplo:</i> <code>/add zara 2731/240 S</code>"
-            )
+        if not user_items:
+            send_telegram(token, chat_id, "ℹ️ No tienes ninguna prenda para borrar.")
             return
 
-        first_arg = parts[1]
-        if first_arg.startswith("http"):
-            detected_store = store_checker.detect_store(first_arg)
-            ref_or_url = first_arg
-            size = parts[2].upper()
-        else:
-            detected_store = store_checker.detect_store(first_arg)
-            ref_or_url = parts[2]
-            size = parts[3].upper() if len(parts) >= 4 else "XS"
-
-        url = store_checker.build_search_or_product_url(detected_store, ref_or_url)
-        
-        # Check if already tracked by someone
-        existing = None
-        for a in alerts:
-            if a.get("store") == detected_store and a.get("size") == size and (a.get("ref") == ref_or_url or a.get("url") == url):
-                existing = a
-                break
-
-        if existing:
-            if chat_id not in existing.get("chat_ids", []):
-                existing.setdefault("chat_ids", []).append(chat_id)
+        parts = clean_text.split()
+        if len(parts) >= 2 and parts[1].isdigit():
+            idx = int(parts[1]) - 1
+            if 0 <= idx < len(user_items):
+                target_item = user_items[idx]
+                if chat_id in target_item.get("chat_ids", []):
+                    target_item["chat_ids"].remove(chat_id)
+                if not target_item.get("chat_ids"):
+                    alerts = [x for x in alerts if x.get("id") != target_item.get("id")]
                 save_alerts(alerts)
-            send_telegram(
-                token, chat_id,
-                f"✅ <b>¡Prenda suscrita con éxito!</b>\n\n"
-                f"🏪 <b>Tienda:</b> {detected_store.upper()}\n"
-                f"👕 <b>Prenda:</b> {existing.get('name', 'Prenda')}\n"
-                f"📏 <b>Talla:</b> {size}\n\n"
-                f"<i>Ya estaba en seguimiento. Te avisaré por aquí en cuanto haya restock.</i>"
-            )
-        else:
-            new_id = max([a.get("id", 0) for a in alerts], default=0) + 1
-            new_item = {
-                "id": new_id,
-                "store": detected_store,
-                "name": f"Prenda {detected_store.capitalize()}",
-                "url": url,
-                "ref": ref_or_url,
-                "size": size,
-                "status": "Comprobando...",
-                "price": "Consultando...",
-                "chat_ids": [chat_id],
-                "last_checked": None
-            }
-            alerts.append(new_item)
-            save_alerts(alerts)
+                send_telegram(token, chat_id, f"🗑️ Has dejado de seguir: <b>{target_item.get('name', 'Prenda')}</b> (Talla {target_item.get('size')}).")
+                return
+            else:
+                send_telegram(token, chat_id, f"⚠️ Número no válido. Tienes {len(user_items)} prendas en /list.")
+                return
 
-            send_telegram(
-                token, chat_id,
-                f"✅ <b>¡Alerta añadida con éxito!</b>\n\n"
-                f"🏪 <b>Tienda:</b> {detected_store.upper()}\n"
-                f"📏 <b>Talla:</b> {size}\n"
-                f"🔗 <a href='{url}'>Enlace guardado</a>\n\n"
-                f"<i>El bot comprobará el stock periódicamente cada minuto y te avisará en cuanto repongan.</i>"
-            )
-    else:
+        # If no number specified, show list and set state
+        USER_STATES[chat_id] = {"state": "WAITING_FOR_DELETE", "timestamp": time.time()}
+        list_lines = ["📋 <b>¿Qué prenda quieres eliminar?</b>\n"]
+        for idx, item in enumerate(user_items, start=1):
+            list_lines.append(f"<b>{idx}.</b> [{item.get('store', '').upper()}] {item.get('name')} (Talla {item.get('size')})")
+        list_lines.append("\n<i>Responde simplemente con el número que quieras borrar (Ej: 1) o escribe /cancelar.</i>")
+        send_telegram(token, chat_id, "\n".join(list_lines))
+        return
+
+    # Intelligent Input Parsing (handles /add or direct text like 'pulandbear 07563305 XS')
+    processed_text = re.sub(r'pull\s*(&|and|y)\s*bear', 'pullandbear', clean_text, flags=re.IGNORECASE)
+    words = processed_text.split()
+    if words and words[0].lower() in ("/add", "/alerta", "/crear", "add"):
+        words = words[1:]
+
+    if not words:
         send_telegram(
             token, chat_id,
-            "❓ Comando no reconocido.\nEscribe <code>/help</code> para ver cómo añadir prendas de Zara, Bershka y Pull&Bear."
+            "👗 <b>Añadir nueva prenda</b>\n\n"
+            "Dime la tienda, referencia y talla:\n"
+            "<i>Ejemplo:</i> <code>pulandbear 07563305 XS</code>\n"
+            "<i>O pega el enlace:</i> <code>https://www.zara.com/es/es/... S</code>"
         )
+        return
+
+    # Case A: URL included
+    url_found = None
+    remaining_words = []
+    for w in words:
+        if w.startswith("http://") or w.startswith("https://"):
+            url_found = w
+        else:
+            remaining_words.append(w)
+
+    if url_found:
+        detected_store = store_checker.normalize_store(url_found) or "zara"
+        if remaining_words:
+            size = store_checker.normalize_size(remaining_words[0])
+            item, is_new = save_new_alert(alerts, detected_store, url_found, size, chat_id)
+            send_telegram(
+                token, chat_id,
+                f"✅ <b>¡Alerta guardada con éxito!</b>\n\n"
+                f"🏪 <b>Tienda:</b> {detected_store.upper()}\n"
+                f"📏 <b>Talla:</b> <b>{size}</b>\n"
+                f"🔗 <a href='{url_found}'>Enlace guardado</a>\n\n"
+                f"🔔 <i>Te avisaré en cuanto haya stock disponible.</i>"
+            )
+        else:
+            # Need size!
+            USER_STATES[chat_id] = {
+                "state": "WAITING_FOR_SIZE",
+                "store": detected_store,
+                "ref_or_url": url_found,
+                "timestamp": time.time()
+            }
+            send_telegram(
+                token, chat_id,
+                f"👗 <b>He reconocido el enlace de {detected_store.upper()}</b>\n\n"
+                "¿Qué talla quieres que vigile?\n"
+                "<i>Responde escribiendo tu talla (Ej: XS, S, M, L, XL, 38...)</i>"
+            )
+        return
+
+    # Case B: Store + Reference (+ Optional Size)
+    potential_store = store_checker.normalize_store(words[0])
+    if potential_store:
+        rest = words[1:]
+        if len(rest) >= 2:
+            ref = rest[0]
+            size = store_checker.normalize_size(rest[1])
+            item, is_new = save_new_alert(alerts, potential_store, ref, size, chat_id)
+            send_telegram(
+                token, chat_id,
+                f"✅ <b>¡Alerta guardada con éxito!</b>\n\n"
+                f"🏪 <b>Tienda:</b> {potential_store.upper()}\n"
+                f"👕 <b>Referencia:</b> <code>{ref}</code>\n"
+                f"📏 <b>Talla:</b> <b>{size}</b>\n\n"
+                f"🔔 <i>Comprobando stock cada minuto. Te avisaré al momento.</i>"
+            )
+            return
+        elif len(rest) == 1:
+            ref = rest[0]
+            # Need size!
+            USER_STATES[chat_id] = {
+                "state": "WAITING_FOR_SIZE",
+                "store": potential_store,
+                "ref_or_url": ref,
+                "timestamp": time.time()
+            }
+            send_telegram(
+                token, chat_id,
+                f"👗 <b>Prenda detectada en {potential_store.upper()}</b> (Ref: <code>{ref}</code>)\n\n"
+                "¿Qué talla estás buscando?\n"
+                "<i>Responde a este mensaje con tu talla (Ej: XS, S, M, L, XL, 38...)</i>"
+            )
+            return
+
+    # Unrecognized message fallback
+    send_telegram(
+        token, chat_id,
+        "❓ No he entendido ese mensaje.\n\n"
+        "Puedes añadir una prenda escribiendo:\n"
+        "<code>pulandbear 07563305 XS</code>\n"
+        "o escribe <code>/help</code> para ver todos los comandos."
+    )
 
 
 def main():
@@ -347,13 +481,12 @@ def main():
     print("=" * 65)
     print("      INDITEX RESTOCK ALERT BOT (ZARA, BERSHKA, PULL&BEAR)")
     print("=" * 65)
-    print("  Soporte multi-usuario activo (Telegram)")
+    print("  Tolerancia a errores tipograficos: Activa")
+    print("  Flujo guiado interactivo: Activo")
     print(f"  Ciclo de escaneo: Cada {check_interval} segundos (~1 minuto)")
     print("=" * 65)
 
-    # Launch Telegram Listener Thread
     threading.Thread(target=telegram_listener_thread, args=(config,), daemon=True).start()
-
     driver = create_driver(config)
 
     try:
@@ -365,7 +498,7 @@ def main():
                 continue
 
             cycle_start_time = time.time()
-            logger.info(f"--- Iniciando ciclo de comprobación de {len(alerts)} prenda(s) ---")
+            logger.info(f"--- Iniciando ciclo de comprobación ({len(alerts)} prendas) ---")
 
             for item in alerts:
                 item_id = item.get("id")
@@ -379,7 +512,6 @@ def main():
                 try:
                     is_avail, price, name, status, final_url = store_checker.check_item_stock(driver, store, url, size)
                     
-                    # Update item info
                     item["name"] = name
                     item["price"] = price
                     item["status"] = status
@@ -387,23 +519,21 @@ def main():
                     item["last_checked"] = now_str
                     save_alerts(alerts)
 
-                    logger.info(f"[{now_str}] [{store.upper()}] {name} ({size}) -> {status} ({price}) | Suscriptores: {len(chat_ids)}")
+                    logger.info(f"[{now_str}] [{store.upper()}] {name} ({size}) -> {status} ({price}) | Usuarios: {len(chat_ids)}")
 
                     # RESTOCK DETECTED
                     if is_avail:
                         last_sent = LAST_NOTIFIED.get(item_id, 0)
-                        # Throttle notifications: at most once every 10 min per item
+                        # Throttle notifications: at most once every 10 min per available item
                         if time.time() - last_sent > 600:
                             LAST_NOTIFIED[item_id] = time.time()
                             logger.info(f"🎉 ¡¡¡RESTOCK DETECTADO EN {store.upper()}!!! {name} ({size})")
 
-                            # Windows sound
                             if config.get("sound_alarm", True):
                                 global ALARM_ACTIVE
                                 ALARM_ACTIVE = True
                                 threading.Thread(target=play_sound_alarm, daemon=True).start()
 
-                            # Notify ALL subscribed users
                             tg = config.get("telegram", {})
                             token = tg.get("bot_token")
                             msg = (
@@ -419,10 +549,8 @@ def main():
                 except Exception as e:
                     logger.warning(f"Error comprobando [{store}] {url}: {e}")
 
-                # Small delay between items within the same cycle
                 time.sleep(3)
 
-            # Sleep remaining time until 60s
             elapsed = time.time() - cycle_start_time
             sleep_needed = max(5, check_interval - elapsed)
             logger.info(f"Ciclo completado en {elapsed:.1f}s. Próxima comprobación en {sleep_needed:.1f}s...")

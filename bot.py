@@ -1,7 +1,7 @@
 """
 =============================================================================
-Pull&Bear Restock & Auto-Buy Monitor Bot
-Producto: Cardigan cremallera Dickies (Ref 07563305 / Color 712)
+Inditex Multi-Store Restock Bot (Pull&Bear, Zara, Bershka)
+Con alertas instantaneas a Telegram y control interactivo por chat.
 =============================================================================
 """
 
@@ -17,7 +17,8 @@ from datetime import datetime
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
+
+import store_checker
 
 # Logging configuration
 logging.basicConfig(
@@ -28,10 +29,14 @@ logging.basicConfig(
         logging.FileHandler("bot.log", encoding="utf-8")
     ]
 )
-logger = logging.getLogger("PullBearBot")
+logger = logging.getLogger("InditexBot")
 
-# Alarm flag
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+ALERTS_PATH = os.path.join(BASE_DIR, "alerts.json")
+
 ALARM_ACTIVE = False
+LAST_NOTIFIED = {}  # item_id -> timestamp to avoid spam
 
 
 def play_sound_alarm():
@@ -57,7 +62,6 @@ def show_windows_popup(title, message):
     def _popup():
         try:
             import ctypes
-            # MB_OK | MB_ICONEXCLAMATION | MB_SYSTEMMODAL (0x0 | 0x30 | 0x1000)
             ctypes.windll.user32.MessageBoxW(0, message, title, 0x30 | 0x1000)
         except Exception as e:
             logger.warning(f"Error mostrando ventana emergente: {e}")
@@ -74,64 +78,62 @@ def send_telegram(token, chat_id, message):
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             if resp.status == 200:
-                logger.info("Notificacion Telegram enviada con exito.")
+                logger.info(f"Mensaje Telegram enviado a {chat_id}.")
     except Exception as e:
         logger.error(f"Error enviando Telegram: {e}")
 
 
-def send_discord(webhook_url, content, embed_data=None):
-    """Sends notification to Discord webhook."""
-    if not webhook_url or webhook_url == "TU_DISCORD_WEBHOOK_AQUI":
-        return
-    try:
-        body = {"content": content}
-        if embed_data:
-            body["embeds"] = [embed_data]
-        payload = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(webhook_url, data=payload, headers={"Content-Type": "application/json", "User-Agent": "PullBearBot"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status in (200, 204):
-                logger.info("Notificacion Discord enviada con exito.")
-    except Exception as e:
-        logger.error(f"Error enviando Discord: {e}")
-
-
 def load_config():
-    """Loads configuration from config.json or returns default values."""
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    """Loads configuration from config.json."""
     defaults = {
-        "product_url": "https://www.pullandbear.com/es/cardigan-cremallera-dickies-l07563305?cS=712",
-        "target_size": "XS",
-        "check_interval_seconds": 5,
-        "refresh_page_interval_minutes": 15,
-        "headless": False,
-        "user_data_dir": "./chrome_profile",
-        "auto_add_to_cart": True,
-        "auto_open_checkout": True,
+        "check_interval_seconds": 8,
+        "headless": True,
         "sound_alarm": True,
         "windows_notification": True,
-        "telegram": {"enabled": False, "bot_token": "", "chat_id": ""},
-        "discord": {"enabled": False, "webhook_url": ""}
+        "telegram": {
+            "enabled": True,
+            "bot_token": "8745818951:AAEHN0Xsw6Ki5lPiSUxPrUV7LbVfndRjR-c",
+            "chat_id": "1997921776"
+        }
     }
-    if os.path.exists(config_path):
+    if os.path.exists(CONFIG_PATH):
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 user_conf = json.load(f)
                 defaults.update(user_conf)
-                logger.info(f"Configuracion cargada desde {config_path}")
         except Exception as e:
-            logger.warning(f"Error leyendo config.json ({e}). Usando configuracion por defecto.")
+            logger.warning(f"Error leyendo config.json: {e}")
     return defaults
+
+
+def load_alerts():
+    """Loads tracked items from alerts.json."""
+    if os.path.exists(ALERTS_PATH):
+        try:
+            with open(ALERTS_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Error leyendo alerts.json: {e}")
+    return []
+
+
+def save_alerts(alerts):
+    """Saves tracked items to alerts.json."""
+    try:
+        with open(ALERTS_PATH, "w", encoding="utf-8") as f:
+            json.dump(alerts, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error guardando alerts.json: {e}")
 
 
 def create_driver(config):
     """Initializes and returns a Selenium Chrome driver with anti-detection options."""
     options = Options()
-    if config.get("headless", False):
+    if config.get("headless", True):
         options.add_argument("--headless=new")
-        logger.info("Modo Headless activado (Chrome en segundo plano).")
+        logger.info("Modo Headless activado.")
     else:
-        logger.info("Modo Visual activado (Ventana de Chrome visible).")
+        logger.info("Modo Visual activado.")
 
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--no-sandbox")
@@ -143,11 +145,10 @@ def create_driver(config):
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
-    profile_dir = config.get("user_data_dir")
+    profile_dir = config.get("user_data_dir", "./chrome_profile")
     if profile_dir:
         abs_profile = os.path.abspath(profile_dir)
         options.add_argument(f"--user-data-dir={abs_profile}")
-        logger.info(f"Perfil de usuario de Chrome: {abs_profile}")
 
     driver = webdriver.Chrome(options=options)
     driver.execute_cdp_cmd(
@@ -157,324 +158,241 @@ def create_driver(config):
     return driver
 
 
-def wait_for_page_and_extract_metadata(driver, url, max_retries=6):
-    """Loads the product page and retrieves Inditex IDs."""
-    logger.info(f"Navegando a la prenda: {url}")
-    driver.get(url)
-
-    for attempt in range(max_retries):
-        time.sleep(3)
-        title = driver.title
-        logger.info(f"Esperando verificacion Akamai/Inditex... (Intento {attempt+1}/{max_retries}) | Titulo: {title}")
-
-        meta = driver.execute_script("""
-            if (window.inditex && window.inditex.iProductId) {
-                return {
-                    productId: window.inditex.iProductId,
-                    storeId: window.inditex.iStoreId || 24009400,
-                    catalogId: window.inditex.iCatalogId || 20309459,
-                    langId: window.inditex.iLangId || -5,
-                    productRef: window.inditex.iProductReference || '07563305'
-                };
-            }
-            return null;
-        """)
-
-        if meta and meta.get("productId"):
-            logger.info(f"Metadatos obtenidos: ProductId={meta['productId']}, StoreId={meta['storeId']}, CatalogId={meta['catalogId']}")
-            return meta
-
-    # Fallback to known constants for this product if metadata wasn't populated in global window
-    logger.warning("No se pudo extraer window.inditex automaticamente. Usando identificadores conocidos del producto Dickies.")
-    return {
-        "productId": 751020357,
-        "storeId": 24009400,
-        "catalogId": 20309459,
-        "langId": -5,
-        "productRef": "07563305"
-    }
-
-
-def query_product_stock_info(driver, meta, target_size="XS"):
-    """Queries in-session ITX detail endpoint and returns target size info."""
-    script = f"""
-        var done = arguments[0];
-        var url = "https://www.pullandbear.com/itxrest/2/catalog/store/{meta['storeId']}/{meta['catalogId']}/category/0/product/{meta['productId']}/detail?languageId={meta['langId']}&appId=1";
-        fetch(url)
-            .then(r => r.json())
-            .then(data => {{
-                var found = null;
-                var productName = data.name || "Cárdigan Dickies";
-                var colors = (data.detail && data.detail.colors) ? data.detail.colors : [];
-                for (var i = 0; i < colors.length; i++) {{
-                    var sizes = colors[i].sizes || [];
-                    for (var j = 0; j < sizes.length; j++) {{
-                        var s = sizes[j];
-                        if (s.name && s.name.toUpperCase() === "{target_size.upper()}") {{
-                            found = {{
-                                name: s.name,
-                                sku: s.sku,
-                                price: s.price,
-                                visibilityValue: s.visibilityValue,
-                                backSoon: s.backSoon,
-                                isBuyable: s.isBuyable,
-                                colorId: colors[i].id,
-                                colorName: colors[i].name,
-                                productName: productName
-                            }};
-                            break;
-                        }}
-                    }}
-                    if (found) break;
-                }}
-                done({{ success: true, target: found, allSizes: (colors[0] ? colors[0].sizes.map(x => ({{ name: x.name, vis: x.visibilityValue }})) : []) }});
-            }})
-            .catch(err => done({{ success: false, error: err.toString() }}));
-    """
-    res = driver.execute_async_script(script)
-    return res
-
-
-def execute_auto_cart(driver, meta, size_info):
-    """Executes automated addition to shopping cart both via API and DOM."""
-    sku = size_info.get("sku", 751020361)
-    logger.info(f"Ejecutando adicion al carrito para SKU {sku} (Talla {size_info.get('name')})...")
-
-    # 1. Direct in-session API call
-    cart_script = f"""
-        var done = arguments[0];
-        var url = "https://www.pullandbear.com/itxrest/2/order/store/{meta['storeId']}/order/0/orderitem?languageId={meta['langId']}&appId=1";
-        fetch(url, {{
-            method: "POST",
-            headers: {{
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }},
-            body: JSON.stringify({{
-                "orderItems": [{{ "catentryId": {sku}, "quantity": 1 }}]
-            }})
-        }})
-        .then(r => r.json())
-        .then(data => done({{ success: true, data: data }}))
-        .catch(err => done({{ success: false, error: err.toString() }}));
-    """
-    api_cart_res = driver.execute_async_script(cart_script)
-    logger.info(f"Resultado llamada API Cesta: {api_cart_res}")
-
-    # 2. DOM click backup
-    dom_res = driver.execute_script(f"""
-        var clickedSize = false;
-        var clickedBuy = false;
-        var sizeName = "{size_info.get('name', 'XS')}";
-        document.querySelectorAll('button.size-item').forEach(btn => {{
-            if (btn.innerText.includes(sizeName)) {{
-                btn.click();
-                clickedSize = true;
-            }}
-        }});
-        var buyBtn = document.querySelector('button.itx-buy-button');
-        if (buyBtn && !buyBtn.disabled) {{
-            buyBtn.click();
-            clickedBuy = true;
-        }}
-        return {{ clickedSize: clickedSize, clickedBuy: clickedBuy }};
-    """)
-    logger.info(f"Resultado interaccion DOM: {dom_res}")
-
-
-def trigger_notifications(config, meta, size_info):
-    """Dispatches alerts across all configured channels."""
-    global ALARM_ACTIVE
-    product_name = size_info.get("productName", "Cárdigan Dickies")
-    size_name = size_info.get("name", "XS")
-    price_cents = int(size_info.get("price", 4599))
-    price_euros = f"{price_cents / 100:.2f} €"
-    url = config.get("product_url")
-
-    alert_text = (
-        f"🚨 ¡RESTOCK DETECTADO EN PULL&BEAR! 🚨\n"
-        f"Prenda: {product_name}\n"
-        f"Talla: {size_name} DISPONIBLE\n"
-        f"Precio: {price_euros}\n"
-        f"Enlace: {url}"
-    )
-
-    # Console banner
-    print("\n" + "=" * 60)
-    print("      🎉 ¡¡¡RESTOCK DETECTADO - TALLA DISPONIBLE!!! 🎉")
-    print(f"  Prenda: {product_name}")
-    print(f"  Talla:  {size_name}")
-    print(f"  Precio: {price_euros}")
-    print("=" * 60 + "\n")
-
-    # Sound alarm
-    if config.get("sound_alarm", True):
-        ALARM_ACTIVE = True
-        threading.Thread(target=play_sound_alarm, daemon=True).start()
-
-    # Windows Modal Popup
-    if config.get("windows_notification", True):
-        show_windows_popup(
-            "¡RESTOCK EN PULL&BEAR!",
-            f"¡La talla {size_name} de '{product_name}' vuelve a estar disponible!\n\nRevisa la ventana del navegador ahora."
-        )
-
-    # Telegram
+def telegram_listener_thread(config):
+    """Listens for user commands via Telegram bot polling."""
     tg = config.get("telegram", {})
-    if tg.get("enabled", False):
-        cart_url = "https://www.pullandbear.com/es/cart.html"
-        auto_cart_status = "✅ Añadida automáticamente a la cesta" if config.get("auto_add_to_cart", True) else "⚠️ Pendiente de añadir"
-        tg_msg = (
-            f"🔥 <b>¡RESTOCK PULL&BEAR!</b> 🔥\n\n"
-            f"<b>Prenda:</b> {product_name}\n"
-            f"<b>Talla:</b> {size_name} DISPONIBLE ✅\n"
-            f"<b>Precio:</b> {price_euros}\n"
-            f"<b>Estado Cesta:</b> {auto_cart_status}\n\n"
-            f"🛒 <a href='{cart_url}'><b>IR DIRECTO AL PAGO / CESTA</b></a>\n"
-            f"🔗 <a href='{url}'>Ver Ficha del Producto</a>"
-        )
-        send_telegram(tg.get("bot_token"), tg.get("chat_id"), tg_msg)
+    token = tg.get("bot_token")
+    target_chat = str(tg.get("chat_id", ""))
+    if not token or not tg.get("enabled"):
+        logger.info("Telegram listener desactivado (no configurado).")
+        return
 
-    # Discord
-    dc = config.get("discord", {})
-    if dc.get("enabled", False):
-        embed = {
-            "title": f"¡Restock! {product_name} ({size_name})",
+    logger.info("Iniciando escucha de comandos de Telegram...")
+    offset = 0
+
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout=10"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                for update in data.get("result", []):
+                    offset = update["update_id"] + 1
+                    msg = update.get("message", {})
+                    chat_id = str(msg.get("chat", {}).get("id", ""))
+                    text = (msg.get("text") or "").strip()
+
+                    # Only respond to authorized chat_id or owner
+                    if chat_id != target_chat:
+                        continue
+
+                    handle_telegram_command(token, chat_id, text)
+        except Exception as e:
+            time.sleep(3)
+        time.sleep(1)
+
+
+def handle_telegram_command(token, chat_id, text):
+    """Processes incoming Telegram bot commands."""
+    alerts = load_alerts()
+    parts = text.split()
+    cmd = parts[0].lower() if parts else ""
+
+    if cmd in ("/start", "/help", "ayuda"):
+        help_msg = (
+            "👋 <b>¡Hola! Soy tu Bot de Restock para Inditex</b> (Zara, Bershka y Pull&Bear).\n\n"
+            "👗 <b>Comandos disponibles:</b>\n\n"
+            "• <b>Añadir alerta:</b>\n"
+            "<code>/add &lt;tienda&gt; &lt;referencia o enlace&gt; &lt;talla&gt;</code>\n"
+            "<i>Ejemplos:</i>\n"
+            "<code>/add pullandbear 07563305 XS</code>\n"
+            "<code>/add zara 2731/240 S</code>\n"
+            "<code>/add bershka 0123/456 M</code>\n"
+            "<code>/add https://www.zara.com/es/es/... M</code>\n\n"
+            "• <code>/list</code> : Ver todas las prendas en seguimiento y su estado.\n"
+            "• <code>/del &lt;número&gt;</code> : Eliminar una alerta (ej: <code>/del 1</code>).\n"
+            "• <code>/test</code> : Enviar una alerta de prueba."
+        )
+        send_telegram(token, chat_id, help_msg)
+
+    elif cmd in ("/list", "/status", "lista"):
+        if not alerts:
+            send_telegram(token, chat_id, "ℹ️ No tienes ninguna prenda en seguimiento todavía.\nAñade una con:\n<code>/add &lt;tienda&gt; &lt;referencia&gt; &lt;talla&gt;</code>")
+            return
+
+        lines = ["📋 <b>Prendas en seguimiento:</b>\n"]
+        for idx, item in enumerate(alerts, start=1):
+            store_name = item.get("store", "tienda").upper()
+            name = item.get("name", "Prenda")
+            size = item.get("size", "XS")
+            status = item.get("status", "Comprobando...")
+            price = item.get("price", "")
+            icon = "✅ DISPONIBLE" if status not in ("SOLD_OUT", "Comprobando...", "UNKNOWN") else "❌ AGOTADO"
+            
+            lines.append(
+                f"<b>{idx}. [{store_name}] {name}</b>\n"
+                f"   Talla: <b>{size}</b> | Estado: {icon}\n"
+                f"   Precio: {price}\n"
+                f"   🔗 <a href='{item.get('url')}'>Ver Prenda</a>\n"
+            )
+        lines.append("<i>Para borrar una alerta usa /del &lt;número&gt;</i>")
+        send_telegram(token, chat_id, "\n".join(lines))
+
+    elif cmd in ("/del", "/delete", "/borrar", "/eliminar"):
+        if len(parts) < 2 or not parts[1].isdigit():
+            send_telegram(token, chat_id, "⚠️ Indica el número de la prenda a eliminar.\nEjemplo: <code>/del 1</code> (mira el número con /list)")
+            return
+        idx = int(parts[1]) - 1
+        if 0 <= idx < len(alerts):
+            removed = alerts.pop(idx)
+            save_alerts(alerts)
+            send_telegram(token, chat_id, f"🗑️ Alerta eliminada para: <b>{removed.get('name', 'Prenda')}</b> ({removed.get('size')}).")
+        else:
+            send_telegram(token, chat_id, f"⚠️ Número no válido. Tienes {len(alerts)} prendas en /list.")
+
+    elif cmd in ("/test", "test"):
+        send_telegram(
+            token, chat_id,
+            "🔔 <b>¡Test de Alerta Correcto!</b>\n"
+            "Tu bot está escuchando y listo para avisarte de cualquier restock en Zara, Bershka o Pull&Bear."
+        )
+
+    elif cmd in ("/add", "/alerta", "/crear"):
+        if len(parts) < 3:
+            send_telegram(
+                token, chat_id,
+                "⚠️ <b>Formato incorrecto.</b>\n"
+                "Usa: <code>/add &lt;tienda&gt; &lt;referencia o enlace&gt; &lt;talla&gt;</code>\n\n"
+                "<i>Ejemplo:</i> <code>/add pullandbear 07563305 XS</code>\n"
+                "<i>Ejemplo:</i> <code>/add zara 2731/240 S</code>"
+            )
+            return
+
+        # Check if first arg is a full URL or store name
+        first_arg = parts[1]
+        if first_arg.startswith("http"):
+            detected_store = store_checker.detect_store(first_arg)
+            ref_or_url = first_arg
+            size = parts[2].upper()
+        else:
+            detected_store = store_checker.detect_store(first_arg)
+            ref_or_url = parts[2]
+            size = parts[3].upper() if len(parts) >= 4 else "XS"
+
+        url = store_checker.build_search_or_product_url(detected_store, ref_or_url)
+        new_id = max([a.get("id", 0) for a in alerts], default=0) + 1
+        new_item = {
+            "id": new_id,
+            "store": detected_store,
+            "name": f"Prenda {detected_store.capitalize()}",
             "url": url,
-            "color": 0x2ECC71,  # Green
-            "fields": [
-                {"name": "Talla", "value": size_name, "inline": True},
-                {"name": "Precio", "value": price_euros, "inline": True},
-                {"name": "Estado", "value": "DISPONIBLE", "inline": True}
-            ],
-            "footer": {"text": "Pull&Bear Restock Bot"}
+            "ref": ref_or_url,
+            "size": size,
+            "status": "Comprobando...",
+            "price": "Consultando...",
+            "last_checked": None
         }
-        send_discord(dc.get("webhook_url"), "@everyone ¡Restock detectado!", embed)
+        alerts.append(new_item)
+        save_alerts(alerts)
+
+        send_telegram(
+            token, chat_id,
+            f"✅ <b>¡Alerta añadida con éxito!</b>\n\n"
+            f"🏪 <b>Tienda:</b> {detected_store.upper()}\n"
+            f"📏 <b>Talla:</b> {size}\n"
+            f"🔗 <a href='{url}'>Enlace guardado</a>\n\n"
+            f"<i>El bot ha empezado a monitorizarla y te avisará en cuanto haya stock.</i>"
+        )
+    else:
+        send_telegram(
+            token, chat_id,
+            "❓ Comando no reconocido.\nEscribe <code>/help</code> para ver cómo añadir prendas de Zara, Bershka y Pull&Bear."
+        )
 
 
 def main():
     config = load_config()
-    target_size = config.get("target_size", "XS").upper()
-    check_interval = max(2, config.get("check_interval_seconds", 5))
-    refresh_interval = config.get("refresh_page_interval_minutes", 15) * 60
+    check_interval = max(3, config.get("check_interval_seconds", 8))
 
-    print("=" * 60)
-    print("   PULL&BEAR RESTOCK & AUTO-BUY BOT")
-    print(f"   Objetivo: {config.get('product_url')}")
-    print(f"   Talla objetivo: {target_size}")
-    print(f"   Intervalo de escaneo: {check_interval} segundos")
-    print(f"   Auto-añadir al carrito: {config.get('auto_add_to_cart', True)}")
-    print(f"   Auto-abrir checkout: {config.get('auto_open_checkout', True)}")
-    print("=" * 60)
+    print("=" * 65)
+    print("      INDITEX RESTOCK ALERT BOT (ZARA, BERSHKA, PULL&BEAR)")
+    print("=" * 65)
+    print("  Escuchando comandos de Telegram interactivos...")
+    print(f"  Intervalo entre comprobaciones: {check_interval}s")
+    print("=" * 65)
+
+    # Launch Telegram Listener Thread
+    threading.Thread(target=telegram_listener_thread, args=(config,), daemon=True).start()
 
     driver = create_driver(config)
-    last_page_refresh = time.time()
-    consecutive_errors = 0
-    checks_count = 0
+    last_refresh_time = time.time()
 
     try:
-        meta = wait_for_page_and_extract_metadata(driver, config.get("product_url"))
-
-        # Initial check
-        init_res = query_product_stock_info(driver, meta, target_size)
-        if init_res.get("success") and init_res.get("target"):
-            t_info = init_res["target"]
-            logger.info(f"Prenda identificada: '{t_info.get('productName')}' | Color: {t_info.get('colorName')}")
-            logger.info(f"SKU Talla {target_size}: {t_info.get('sku')} | Precio: {int(t_info.get('price', 4599))/100:.2f} €")
-            logger.info(f"Estado inicial de la talla {target_size}: [{t_info.get('visibilityValue')}]")
-        else:
-            logger.warning(f"No se pudo consultar el estado inicial: {init_res}")
-
-        logger.info(f"--- Iniciando monitorizacion continua cada {check_interval}s (Pulsa Ctrl+C para detener) ---")
-
         while True:
-            checks_count += 1
-            now_str = datetime.now().strftime("%H:%M:%S")
-
-            # Check if it's time for a session refresh
-            if time.time() - last_page_refresh > refresh_interval:
-                logger.info("Refrescando la pagina para mantener la sesion de Akamai activa...")
-                driver.get(config.get("product_url"))
-                time.sleep(4)
-                last_page_refresh = time.time()
-
-            # Query stock
-            t0 = time.time()
-            res = query_product_stock_info(driver, meta, target_size)
-            latency = time.time() - t0
-
-            if not res or not res.get("success"):
-                consecutive_errors += 1
-                logger.warning(f"[{now_str}] Error comprobando stock (Intento {consecutive_errors}): {res.get('error') if res else 'None'}")
-                if consecutive_errors >= 3:
-                    logger.info("Demasiados fallos seguidos. Recargando la pagina web...")
-                    driver.get(config.get("product_url"))
-                    time.sleep(5)
-                    consecutive_errors = 0
-                    last_page_refresh = time.time()
+            alerts = load_alerts()
+            if not alerts:
+                logger.info("No hay prendas en seguimiento en alerts.json. Esperando comandos de Telegram...")
                 time.sleep(check_interval)
                 continue
 
-            consecutive_errors = 0
-            size_data = res.get("target")
+            for item in alerts:
+                item_id = item.get("id")
+                store = item.get("store", "pullandbear")
+                url = item.get("url")
+                size = item.get("size", "XS")
 
-            if not size_data:
-                logger.warning(f"[{now_str}] Talla {target_size} no encontrada en los datos recibidos.")
-                time.sleep(check_interval)
-                continue
+                now_str = datetime.now().strftime("%H:%M:%S")
 
-            visibility = size_data.get("visibilityValue", "UNKNOWN")
-            is_buyable = size_data.get("isBuyable", False)
-
-            # RESTOCK CHECK:
-            # When sold out, visibilityValue is 'SOLD_OUT'.
-            # When available, it is 'SHOW', 'RUNNING_OUT', 'IN_STOCK', or backSoon changes.
-            is_available = (visibility != "SOLD_OUT") or (is_buyable and visibility in ("SHOW", "RUNNING_OUT", "LOW_STOCK"))
-
-            if is_available:
-                logger.info(f"[{now_str}] ¡¡¡RESTOCK CONFIRMADO!!! Estado actual: {visibility}")
-
-                # 1. Disparar notificaciones y alarmas
-                trigger_notifications(config, meta, size_data)
-
-                # 2. Auto Add to Cart
-                if config.get("auto_add_to_cart", True):
-                    execute_auto_cart(driver, meta, size_data)
-
-                # 3. Auto Open Checkout
-                if config.get("auto_open_checkout", True):
-                    logger.info("Navegando a la pasarela de compra (Checkout/Cesta)...")
-                    driver.get("https://www.pullandbear.com/es/cart.html")
-                    time.sleep(2)
-
-                # Mantener la ventana abierta y activa
-                logger.info("El bot ha reservado la prenda en la cesta. Finaliza el pago manualmente en la ventana.")
-                print("\nPulsa Enter en esta consola cuando hayas terminado para cerrar el bot...")
                 try:
-                    input()
-                except Exception:
-                    time.sleep(3600)
-                break
-            else:
-                # Log status periodically
-                all_status = ", ".join([f"{x['name']}:{x['vis']}" for x in res.get("allSizes", [])])
-                if checks_count % 5 == 1 or check_interval >= 10:
-                    logger.info(f"[{now_str}] Comprobacion #{checks_count} ({latency:.2f}s) -> Talla {target_size}: {visibility} | (Todas: {all_status})")
+                    is_avail, price, name, status, final_url = store_checker.check_item_stock(driver, store, url, size)
+                    
+                    # Update item info
+                    item["name"] = name
+                    item["price"] = price
+                    item["status"] = status
+                    item["url"] = final_url
+                    item["last_checked"] = now_str
+                    save_alerts(alerts)
 
-            time.sleep(check_interval)
+                    logger.info(f"[{now_str}] [{store.upper()}] {name} ({size}) -> {status} ({price})")
+
+                    # If RESTOCK DETECTED
+                    if is_avail:
+                        last_sent = LAST_NOTIFIED.get(item_id, 0)
+                        # Alert at most once every 10 minutes per available item to avoid spam
+                        if time.time() - last_sent > 600:
+                            LAST_NOTIFIED[item_id] = time.time()
+                            logger.info(f"🎉 ¡¡¡RESTOCK DETECTADO EN {store.upper()}!!! Prenda: {name} ({size})")
+
+                            # Sound alarm on Windows
+                            if config.get("sound_alarm", True):
+                                global ALARM_ACTIVE
+                                ALARM_ACTIVE = True
+                                threading.Thread(target=play_sound_alarm, daemon=True).start()
+
+                            # Send Telegram alert
+                            tg = config.get("telegram", {})
+                            msg = (
+                                f"🚨 <b>¡RESTOCK EN {store.upper()}!</b> 🚨\n\n"
+                                f"<b>Prenda:</b> {name}\n"
+                                f"<b>Talla:</b> {size} DISPONIBLE ✅\n"
+                                f"<b>Precio:</b> {price}\n\n"
+                                f"🛒 <a href='{final_url}'><b>PULSA AQUÍ PARA COMPRAR</b></a>\n"
+                            )
+                            send_telegram(tg.get("bot_token"), tg.get("chat_id"), msg)
+
+                except Exception as e:
+                    logger.warning(f"Error comprobando [{store}] {url}: {e}")
+
+                time.sleep(check_interval)
 
     except KeyboardInterrupt:
-        logger.info("\nMonitorizacion detenida manualmente por el usuario.")
-    except Exception as e:
-        logger.error(f"Error inesperado en la ejecucion del bot: {e}", exc_info=True)
+        logger.info("Bot detenido por el usuario.")
     finally:
-        global ALARM_ACTIVE
-        ALARM_ACTIVE = False
         try:
             driver.quit()
         except Exception:
             pass
-        logger.info("Navegador cerrado. Bot finalizado.")
 
 
 if __name__ == "__main__":

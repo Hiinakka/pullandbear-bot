@@ -45,41 +45,46 @@ LAST_NOTIFIED = {}  # item_id -> timestamp
 USER_STATES = {}    # chat_id -> dict(state, store, ref_or_url, timestamp)
 
 
+USERS_LOCK = threading.Lock()
+
+
 def register_user(chat_id, first_name="", username=""):
     """Registers or updates a user in users.json to ensure they receive broadcast updates."""
     if not chat_id:
         return
-    users = {}
-    if os.path.exists(USERS_PATH):
+    with USERS_LOCK:
+        users = {}
+        if os.path.exists(USERS_PATH):
+            try:
+                with open(USERS_PATH, "r", encoding="utf-8") as f:
+                    users = json.load(f)
+            except Exception:
+                users = {}
+
+        cid_str = str(chat_id)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if cid_str not in users:
+            users[cid_str] = {
+                "chat_id": cid_str,
+                "name": first_name or "Usuario",
+                "username": username or "",
+                "joined_at": now_str,
+                "last_active": now_str
+            }
+            logger.info(f"👤 ¡Nuevo usuario registrado en users.json!: {first_name} (@{username}) | ID: {cid_str}")
+        else:
+            users[cid_str]["last_active"] = now_str
+            if first_name:
+                users[cid_str]["name"] = first_name
+            if username:
+                users[cid_str]["username"] = username
+
         try:
-            with open(USERS_PATH, "r", encoding="utf-8") as f:
-                users = json.load(f)
-        except Exception:
-            users = {}
-
-    cid_str = str(chat_id)
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    if cid_str not in users:
-        users[cid_str] = {
-            "chat_id": cid_str,
-            "name": first_name or "Usuario",
-            "username": username or "",
-            "joined_at": now_str,
-            "last_active": now_str
-        }
-    else:
-        users[cid_str]["last_active"] = now_str
-        if first_name:
-            users[cid_str]["name"] = first_name
-        if username:
-            users[cid_str]["username"] = username
-
-    try:
-        with open(USERS_PATH, "w", encoding="utf-8") as f:
-            json.dump(users, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        logger.warning(f"Error guardando users.json: {e}")
+            with open(USERS_PATH, "w", encoding="utf-8") as f:
+                json.dump(users, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"Error guardando users.json: {e}")
 
 
 def play_sound_alarm():

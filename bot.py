@@ -1,7 +1,8 @@
 """
 =============================================================================
 Inditex Multi-Store Restock Bot (Pull&Bear, Zara, Bershka)
-Con alertas instantaneas a Telegram y control interactivo por chat.
+- Escaneo cada 1 minuto (60s) para evitar sobrecargas.
+- Soporte multi-usuario (hasta 5 o más personas por Telegram).
 =============================================================================
 """
 
@@ -20,7 +21,6 @@ from selenium.webdriver.chrome.options import Options
 
 import store_checker
 
-# Logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -36,7 +36,7 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 ALERTS_PATH = os.path.join(BASE_DIR, "alerts.json")
 
 ALARM_ACTIVE = False
-LAST_NOTIFIED = {}  # item_id -> timestamp to avoid spam
+LAST_NOTIFIED = {}  # item_id -> timestamp
 
 
 def play_sound_alarm():
@@ -55,22 +55,9 @@ def play_sound_alarm():
         logger.warning(f"No se pudo reproducir sonido de alarma: {e}")
 
 
-def show_windows_popup(title, message):
-    """Displays a top-most Windows alert box without blocking."""
-    if sys.platform != "win32":
-        return
-    def _popup():
-        try:
-            import ctypes
-            ctypes.windll.user32.MessageBoxW(0, message, title, 0x30 | 0x1000)
-        except Exception as e:
-            logger.warning(f"Error mostrando ventana emergente: {e}")
-    threading.Thread(target=_popup, daemon=True).start()
-
-
 def send_telegram(token, chat_id, message):
-    """Sends notification to Telegram bot."""
-    if not token or not chat_id or token == "TU_BOT_TOKEN_AQUI":
+    """Sends notification to a specific Telegram chat_id."""
+    if not token or not chat_id:
         return
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -78,18 +65,17 @@ def send_telegram(token, chat_id, message):
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             if resp.status == 200:
-                logger.info(f"Mensaje Telegram enviado a {chat_id}.")
+                logger.info(f"Mensaje Telegram enviado con éxito a {chat_id}.")
     except Exception as e:
-        logger.error(f"Error enviando Telegram: {e}")
+        logger.error(f"Error enviando Telegram a {chat_id}: {e}")
 
 
 def load_config():
     """Loads configuration from config.json."""
     defaults = {
-        "check_interval_seconds": 8,
+        "check_interval_seconds": 60,
         "headless": True,
         "sound_alarm": True,
-        "windows_notification": True,
         "telegram": {
             "enabled": True,
             "bot_token": "8745818951:AAEHN0Xsw6Ki5lPiSUxPrUV7LbVfndRjR-c",
@@ -111,7 +97,12 @@ def load_alerts():
     if os.path.exists(ALERTS_PATH):
         try:
             with open(ALERTS_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                # Normalize chat_ids format
+                for item in data:
+                    if "chat_ids" not in item:
+                        item["chat_ids"] = ["1997921776"]
+                return data
         except Exception as e:
             logger.warning(f"Error leyendo alerts.json: {e}")
     return []
@@ -159,15 +150,14 @@ def create_driver(config):
 
 
 def telegram_listener_thread(config):
-    """Listens for user commands via Telegram bot polling."""
+    """Listens for user commands via Telegram bot polling (multi-user support)."""
     tg = config.get("telegram", {})
     token = tg.get("bot_token")
-    target_chat = str(tg.get("chat_id", ""))
     if not token or not tg.get("enabled"):
-        logger.info("Telegram listener desactivado (no configurado).")
+        logger.info("Telegram listener desactivado.")
         return
 
-    logger.info("Iniciando escucha de comandos de Telegram...")
+    logger.info("Iniciando escucha multi-usuario de comandos de Telegram...")
     offset = 0
 
     while True:
@@ -180,27 +170,25 @@ def telegram_listener_thread(config):
                     offset = update["update_id"] + 1
                     msg = update.get("message", {})
                     chat_id = str(msg.get("chat", {}).get("id", ""))
+                    user_name = msg.get("from", {}).get("first_name", "Usuario")
                     text = (msg.get("text") or "").strip()
 
-                    # Only respond to authorized chat_id or owner
-                    if chat_id != target_chat:
-                        continue
-
-                    handle_telegram_command(token, chat_id, text)
+                    if chat_id and text:
+                        handle_telegram_command(token, chat_id, user_name, text)
         except Exception as e:
             time.sleep(3)
         time.sleep(1)
 
 
-def handle_telegram_command(token, chat_id, text):
-    """Processes incoming Telegram bot commands."""
+def handle_telegram_command(token, chat_id, user_name, text):
+    """Processes incoming Telegram bot commands for any user."""
     alerts = load_alerts()
     parts = text.split()
     cmd = parts[0].lower() if parts else ""
 
     if cmd in ("/start", "/help", "ayuda"):
         help_msg = (
-            "👋 <b>¡Hola! Soy tu Bot de Restock para Inditex</b> (Zara, Bershka y Pull&Bear).\n\n"
+            f"👋 <b>¡Hola {user_name}! Soy tu Bot de Restock para Inditex</b> (Zara, Bershka y Pull&Bear).\n\n"
             "👗 <b>Comandos disponibles:</b>\n\n"
             "• <b>Añadir alerta:</b>\n"
             "<code>/add &lt;tienda&gt; &lt;referencia o enlace&gt; &lt;talla&gt;</code>\n"
@@ -209,19 +197,22 @@ def handle_telegram_command(token, chat_id, text):
             "<code>/add zara 2731/240 S</code>\n"
             "<code>/add bershka 0123/456 M</code>\n"
             "<code>/add https://www.zara.com/es/es/... M</code>\n\n"
-            "• <code>/list</code> : Ver todas las prendas en seguimiento y su estado.\n"
-            "• <code>/del &lt;número&gt;</code> : Eliminar una alerta (ej: <code>/del 1</code>).\n"
-            "• <code>/test</code> : Enviar una alerta de prueba."
+            "• <code>/list</code> : Ver tus prendas en seguimiento y su estado.\n"
+            "• <code>/del &lt;número&gt;</code> : Dejar de seguir una prenda (ej: <code>/del 1</code>).\n"
+            "• <code>/test</code> : Enviar una alerta de prueba a este chat."
         )
         send_telegram(token, chat_id, help_msg)
 
     elif cmd in ("/list", "/status", "lista"):
-        if not alerts:
+        # Filter items where this chat_id is subscribed
+        user_items = [item for item in alerts if chat_id in item.get("chat_ids", [])]
+
+        if not user_items:
             send_telegram(token, chat_id, "ℹ️ No tienes ninguna prenda en seguimiento todavía.\nAñade una con:\n<code>/add &lt;tienda&gt; &lt;referencia&gt; &lt;talla&gt;</code>")
             return
 
-        lines = ["📋 <b>Prendas en seguimiento:</b>\n"]
-        for idx, item in enumerate(alerts, start=1):
+        lines = [f"📋 <b>Tus prendas en seguimiento ({len(user_items)}):</b>\n"]
+        for idx, item in enumerate(user_items, start=1):
             store_name = item.get("store", "tienda").upper()
             name = item.get("name", "Prenda")
             size = item.get("size", "XS")
@@ -239,22 +230,31 @@ def handle_telegram_command(token, chat_id, text):
         send_telegram(token, chat_id, "\n".join(lines))
 
     elif cmd in ("/del", "/delete", "/borrar", "/eliminar"):
+        user_items = [item for item in alerts if chat_id in item.get("chat_ids", [])]
         if len(parts) < 2 or not parts[1].isdigit():
-            send_telegram(token, chat_id, "⚠️ Indica el número de la prenda a eliminar.\nEjemplo: <code>/del 1</code> (mira el número con /list)")
+            send_telegram(token, chat_id, "⚠️ Indica el número de la prenda a eliminar.\nEjemplo: <code>/del 1</code> (consulta tu lista con /list)")
             return
         idx = int(parts[1]) - 1
-        if 0 <= idx < len(alerts):
-            removed = alerts.pop(idx)
+        if 0 <= idx < len(user_items):
+            target_item = user_items[idx]
+            # Remove chat_id from item's subscribers
+            if chat_id in target_item.get("chat_ids", []):
+                target_item["chat_ids"].remove(chat_id)
+
+            # If no one is following it, remove the item completely
+            if not target_item.get("chat_ids"):
+                alerts = [x for x in alerts if x.get("id") != target_item.get("id")]
+
             save_alerts(alerts)
-            send_telegram(token, chat_id, f"🗑️ Alerta eliminada para: <b>{removed.get('name', 'Prenda')}</b> ({removed.get('size')}).")
+            send_telegram(token, chat_id, f"🗑️ Has dejado de seguir: <b>{target_item.get('name', 'Prenda')}</b> ({target_item.get('size')}).")
         else:
-            send_telegram(token, chat_id, f"⚠️ Número no válido. Tienes {len(alerts)} prendas en /list.")
+            send_telegram(token, chat_id, f"⚠️ Número no válido. Tienes {len(user_items)} prendas en /list.")
 
     elif cmd in ("/test", "test"):
         send_telegram(
             token, chat_id,
             "🔔 <b>¡Test de Alerta Correcto!</b>\n"
-            "Tu bot está escuchando y listo para avisarte de cualquier restock en Zara, Bershka o Pull&Bear."
+            "Tu bot está activo y te enviará un aviso inmediato en cuanto haya restock en Zara, Bershka o Pull&Bear."
         )
 
     elif cmd in ("/add", "/alerta", "/crear"):
@@ -268,7 +268,6 @@ def handle_telegram_command(token, chat_id, text):
             )
             return
 
-        # Check if first arg is a full URL or store name
         first_arg = parts[1]
         if first_arg.startswith("http"):
             detected_store = store_checker.detect_store(first_arg)
@@ -280,29 +279,51 @@ def handle_telegram_command(token, chat_id, text):
             size = parts[3].upper() if len(parts) >= 4 else "XS"
 
         url = store_checker.build_search_or_product_url(detected_store, ref_or_url)
-        new_id = max([a.get("id", 0) for a in alerts], default=0) + 1
-        new_item = {
-            "id": new_id,
-            "store": detected_store,
-            "name": f"Prenda {detected_store.capitalize()}",
-            "url": url,
-            "ref": ref_or_url,
-            "size": size,
-            "status": "Comprobando...",
-            "price": "Consultando...",
-            "last_checked": None
-        }
-        alerts.append(new_item)
-        save_alerts(alerts)
+        
+        # Check if already tracked by someone
+        existing = None
+        for a in alerts:
+            if a.get("store") == detected_store and a.get("size") == size and (a.get("ref") == ref_or_url or a.get("url") == url):
+                existing = a
+                break
 
-        send_telegram(
-            token, chat_id,
-            f"✅ <b>¡Alerta añadida con éxito!</b>\n\n"
-            f"🏪 <b>Tienda:</b> {detected_store.upper()}\n"
-            f"📏 <b>Talla:</b> {size}\n"
-            f"🔗 <a href='{url}'>Enlace guardado</a>\n\n"
-            f"<i>El bot ha empezado a monitorizarla y te avisará en cuanto haya stock.</i>"
-        )
+        if existing:
+            if chat_id not in existing.get("chat_ids", []):
+                existing.setdefault("chat_ids", []).append(chat_id)
+                save_alerts(alerts)
+            send_telegram(
+                token, chat_id,
+                f"✅ <b>¡Prenda suscrita con éxito!</b>\n\n"
+                f"🏪 <b>Tienda:</b> {detected_store.upper()}\n"
+                f"👕 <b>Prenda:</b> {existing.get('name', 'Prenda')}\n"
+                f"📏 <b>Talla:</b> {size}\n\n"
+                f"<i>Ya estaba en seguimiento. Te avisaré por aquí en cuanto haya restock.</i>"
+            )
+        else:
+            new_id = max([a.get("id", 0) for a in alerts], default=0) + 1
+            new_item = {
+                "id": new_id,
+                "store": detected_store,
+                "name": f"Prenda {detected_store.capitalize()}",
+                "url": url,
+                "ref": ref_or_url,
+                "size": size,
+                "status": "Comprobando...",
+                "price": "Consultando...",
+                "chat_ids": [chat_id],
+                "last_checked": None
+            }
+            alerts.append(new_item)
+            save_alerts(alerts)
+
+            send_telegram(
+                token, chat_id,
+                f"✅ <b>¡Alerta añadida con éxito!</b>\n\n"
+                f"🏪 <b>Tienda:</b> {detected_store.upper()}\n"
+                f"📏 <b>Talla:</b> {size}\n"
+                f"🔗 <a href='{url}'>Enlace guardado</a>\n\n"
+                f"<i>El bot comprobará el stock periódicamente cada minuto y te avisará en cuanto repongan.</i>"
+            )
     else:
         send_telegram(
             token, chat_id,
@@ -312,34 +333,37 @@ def handle_telegram_command(token, chat_id, text):
 
 def main():
     config = load_config()
-    check_interval = max(3, config.get("check_interval_seconds", 8))
+    check_interval = max(30, config.get("check_interval_seconds", 60))
 
     print("=" * 65)
     print("      INDITEX RESTOCK ALERT BOT (ZARA, BERSHKA, PULL&BEAR)")
     print("=" * 65)
-    print("  Escuchando comandos de Telegram interactivos...")
-    print(f"  Intervalo entre comprobaciones: {check_interval}s")
+    print("  Soporte multi-usuario activo (Telegram)")
+    print(f"  Ciclo de escaneo: Cada {check_interval} segundos (~1 minuto)")
     print("=" * 65)
 
     # Launch Telegram Listener Thread
     threading.Thread(target=telegram_listener_thread, args=(config,), daemon=True).start()
 
     driver = create_driver(config)
-    last_refresh_time = time.time()
 
     try:
         while True:
             alerts = load_alerts()
             if not alerts:
-                logger.info("No hay prendas en seguimiento en alerts.json. Esperando comandos de Telegram...")
-                time.sleep(check_interval)
+                logger.info("No hay prendas en seguimiento en alerts.json. Esperando comandos...")
+                time.sleep(15)
                 continue
+
+            cycle_start_time = time.time()
+            logger.info(f"--- Iniciando ciclo de comprobación de {len(alerts)} prenda(s) ---")
 
             for item in alerts:
                 item_id = item.get("id")
                 store = item.get("store", "pullandbear")
                 url = item.get("url")
                 size = item.get("size", "XS")
+                chat_ids = item.get("chat_ids", ["1997921776"])
 
                 now_str = datetime.now().strftime("%H:%M:%S")
 
@@ -354,24 +378,25 @@ def main():
                     item["last_checked"] = now_str
                     save_alerts(alerts)
 
-                    logger.info(f"[{now_str}] [{store.upper()}] {name} ({size}) -> {status} ({price})")
+                    logger.info(f"[{now_str}] [{store.upper()}] {name} ({size}) -> {status} ({price}) | Suscriptores: {len(chat_ids)}")
 
-                    # If RESTOCK DETECTED
+                    # RESTOCK DETECTED
                     if is_avail:
                         last_sent = LAST_NOTIFIED.get(item_id, 0)
-                        # Alert at most once every 10 minutes per available item to avoid spam
+                        # Throttle notifications: at most once every 10 min per item
                         if time.time() - last_sent > 600:
                             LAST_NOTIFIED[item_id] = time.time()
-                            logger.info(f"🎉 ¡¡¡RESTOCK DETECTADO EN {store.upper()}!!! Prenda: {name} ({size})")
+                            logger.info(f"🎉 ¡¡¡RESTOCK DETECTADO EN {store.upper()}!!! {name} ({size})")
 
-                            # Sound alarm on Windows
+                            # Windows sound
                             if config.get("sound_alarm", True):
                                 global ALARM_ACTIVE
                                 ALARM_ACTIVE = True
                                 threading.Thread(target=play_sound_alarm, daemon=True).start()
 
-                            # Send Telegram alert
+                            # Notify ALL subscribed users
                             tg = config.get("telegram", {})
+                            token = tg.get("bot_token")
                             msg = (
                                 f"🚨 <b>¡RESTOCK EN {store.upper()}!</b> 🚨\n\n"
                                 f"<b>Prenda:</b> {name}\n"
@@ -379,12 +404,20 @@ def main():
                                 f"<b>Precio:</b> {price}\n\n"
                                 f"🛒 <a href='{final_url}'><b>PULSA AQUÍ PARA COMPRAR</b></a>\n"
                             )
-                            send_telegram(tg.get("bot_token"), tg.get("chat_id"), msg)
+                            for cid in chat_ids:
+                                send_telegram(token, cid, msg)
 
                 except Exception as e:
                     logger.warning(f"Error comprobando [{store}] {url}: {e}")
 
-                time.sleep(check_interval)
+                # Small delay between items within the same cycle
+                time.sleep(3)
+
+            # Sleep remaining time until 60s
+            elapsed = time.time() - cycle_start_time
+            sleep_needed = max(5, check_interval - elapsed)
+            logger.info(f"Ciclo completado en {elapsed:.1f}s. Próxima comprobación en {sleep_needed:.1f}s...")
+            time.sleep(sleep_needed)
 
     except KeyboardInterrupt:
         logger.info("Bot detenido por el usuario.")

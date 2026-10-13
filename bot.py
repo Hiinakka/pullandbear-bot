@@ -97,15 +97,19 @@ def load_config():
 
 
 def load_alerts():
-    """Loads tracked items from alerts.json."""
+    """Loads tracked items from alerts.json, filtering out any invalid links."""
     if os.path.exists(ALERTS_PATH):
         try:
             with open(ALERTS_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
+                clean_data = []
                 for item in data:
+                    if "onetrust" in item.get("url", "").lower() or "consent" in item.get("name", "").lower():
+                        continue
                     if "chat_ids" not in item:
                         item["chat_ids"] = ["1997921776"]
-                return data
+                    clean_data.append(item)
+                return clean_data
         except Exception as e:
             logger.warning(f"Error leyendo alerts.json: {e}")
     return []
@@ -521,8 +525,8 @@ def main():
 
                     logger.info(f"[{now_str}] [{store.upper()}] {name} ({size}) -> {status} ({price}) | Usuarios: {len(chat_ids)}")
 
-                    # RESTOCK DETECTED
-                    if is_avail:
+                    # RESTOCK DETECTED (Strict check to prevent false positives)
+                    if is_avail and status not in ("SOLD_OUT", "OUT_OF_STOCK", "UNKNOWN") and "onetrust" not in str(final_url).lower():
                         last_sent = LAST_NOTIFIED.get(item_id, 0)
                         # Throttle notifications: at most once every 10 min per available item
                         if time.time() - last_sent > 600:

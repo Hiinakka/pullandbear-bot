@@ -24,7 +24,6 @@ def normalize_store(query):
         return None
     q = query.lower().replace("&", "and").replace(" ", "").replace("-", "").strip()
 
-    # Domain detection
     if "pullandbear.com" in q:
         return "pullandbear"
     if "zara.com" in q:
@@ -32,7 +31,6 @@ def normalize_store(query):
     if "bershka.com" in q:
         return "bershka"
 
-    # Substring / Alias matching
     if any(k in q for k in ["pull", "pul", "bear", "pb"]):
         return "pullandbear"
     if any(k in q for k in ["zara", "zar", "zra", "za"]):
@@ -40,7 +38,6 @@ def normalize_store(query):
     if any(k in q for k in ["bersh", "bersk", "berh", "besh", "bsk", "ber"]):
         return "bershka"
 
-    # Fuzzy match fallback
     matches = difflib.get_close_matches(q, CANONICAL_STORES, n=1, cutoff=0.35)
     return matches[0] if matches else None
 
@@ -48,7 +45,6 @@ def normalize_store(query):
 def normalize_size(raw_size):
     """
     Normalizes sizes and strips Spanish words like 'talla', 'la', hyphens, etc.
-    Examples: 'xs', 'x-s', 'la s', 'talla 38', 'mediana', 'extra small' -> 'XS', 'S', '38', 'M', 'XS'.
     """
     s = (raw_size or "").strip().upper()
     s = re.sub(r"^(TALLA|LA|UNA|EN|DE)\s+", "", s).strip()
@@ -56,7 +52,6 @@ def normalize_size(raw_size):
 
     text_aliases = {
         "EXTRASMALL": "XS",
-        "EXTRAPEQUEÑA": "XS",
         "EXTRAPEQUEÑA": "XS",
         "SMALL": "S",
         "PEQUEÑA": "S",
@@ -81,7 +76,8 @@ def build_search_or_product_url(store, ref_or_url):
 
     clean_ref = ref_or_url.replace("/", "").replace(" ", "").strip()
     if store == "pullandbear":
-        if "07563305" in clean_ref:
+        # Known mapping for the Dickies cardigan (both 07563305, 7563305 and color suffix 712)
+        if "7563305" in clean_ref:
             return "https://www.pullandbear.com/es/cardigan-cremallera-dickies-l07563305?cS=712"
         return f"https://www.pullandbear.com/es/search?searchTerm={clean_ref}"
     elif store == "bershka":
@@ -92,7 +88,7 @@ def build_search_or_product_url(store, ref_or_url):
 
 
 def resolve_actual_product_url(driver, store, url):
-    """If url is a search page, navigates to the first product match."""
+    """If url is a search page, navigates to the first product match without picking up cookie banners."""
     if "searchTerm=" not in url and "/search?" not in url:
         return url
 
@@ -100,14 +96,25 @@ def resolve_actual_product_url(driver, store, url):
     try:
         driver.get(url)
         time.sleep(4)
-        product_link = driver.execute_script("""
+
+        # Ignore if access denied
+        title = (driver.title or "").lower()
+        if "access denied" in title or "error" in title or "blocked" in title:
+            logger.warning(f"Buscador bloqueado por WAF en {store}. Manteniendo URL original.")
+            return url
+
+        valid_domain = "pullandbear.com" if store == "pullandbear" else "zara.com" if store == "zara" else "bershka.com"
+        product_link = driver.execute_script(f"""
+            let validDomain = "{valid_domain}";
             let links = [];
-            document.querySelectorAll('a').forEach(a => {
-                let h = a.href || '';
-                if (h.includes('-p') || h.includes('-l0') || (h.includes('.html') && !h.includes('/search'))) {
-                    links.push(h);
-                }
-            });
+            document.querySelectorAll('a').forEach(a => {{
+                let h = (a.href || '').toLowerCase();
+                if (h.includes(validDomain) && !h.includes('/search') && !h.includes('onetrust') && !h.includes('cookie') && !h.includes('consent') && !h.includes('privacy') && !h.includes('help') && !h.includes('faq')) {{
+                    if (h.includes('-p') || h.includes('-l0') || h.includes('-l1') || h.includes('-l2') || h.includes('.html')) {{
+                        links.push(a.href);
+                    }}
+                }}
+            }});
             return links.length > 0 ? links[0] : null;
         """)
         if product_link:
@@ -126,6 +133,10 @@ def check_item_stock(driver, store, product_url, target_size="XS"):
     target_size = normalize_size(target_size)
     resolved_url = resolve_actual_product_url(driver, store, product_url)
 
+    # Protect against bad URLs like OneTrust
+    if "onetrust" in resolved_url.lower() or "consent" in resolved_url.lower():
+        return False, "N/A", "Enlace no válido", "SOLD_OUT", product_url
+
     try:
         if driver.current_url != resolved_url:
             driver.get(resolved_url)
@@ -133,9 +144,13 @@ def check_item_stock(driver, store, product_url, target_size="XS"):
     except Exception as e:
         logger.warning(f"Error cargando {resolved_url}: {e}")
 
-    # Extract title from browser
-    raw_title = driver.title or ""
-    clean_title = raw_title.split("|")[0].split("-")[0].strip() or "Prenda Inditex"
+    # Check for Access Denied or WAF block on product page
+    page_title = driver.title or ""
+    if "access denied" in page_title.lower() or "403" in page_title:
+        logger.warning(f"Página bloqueada temporalmente: {page_title}")
+        return False, "Consultar web", "Prenda", "SOLD_OUT", resolved_url
+
+    clean_title = page_title.split("|")[0].split("-")[0].strip() or "Prenda Inditex"
 
     # 1. PULL&BEAR / BERSHKA (ITX REST detail API within active session)
     if store in ("pullandbear", "bershka"):
@@ -173,7 +188,13 @@ def check_item_stock(driver, store, product_url, target_size="XS"):
                                 vis = s.get("visibilityValue", "UNKNOWN")
                                 price_raw = s.get("price", "0")
                                 price = f"{int(price_raw)/100:.2f} €" if str(price_raw).isdigit() else str(price_raw)
-                                is_avail = (vis != "SOLD_OUT" and vis != "UNKNOWN") or s.get("isBuyable") is True
+                                
+                                # STRICT RESTOCK CHECK: NEVER consider SOLD_OUT as available!
+                                if vis in ("SOLD_OUT", "OUT_OF_STOCK", "UNKNOWN", "HIDDEN"):
+                                    is_avail = False
+                                else:
+                                    is_avail = vis in ("SHOW", "RUNNING_OUT", "LOW_STOCK", "IN_STOCK")
+                                    
                                 return is_avail, price, name, vis, resolved_url
         except Exception as e:
             logger.warning(f"Error en consulta ITX de {store}: {e}")

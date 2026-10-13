@@ -78,7 +78,7 @@ def load_config():
         "sound_alarm": True,
         "telegram": {
             "enabled": True,
-            "bot_token": "8745818951:AAEHN0Xsw6Ki5lPiSUxPrUV7LbVfndRjR-c",
+            "bot_token": "8859607748:AAHMnjhS5quanBfrPul8f1PattZmh85ny3g",
             "chat_id": "1997921776"
         }
     }
@@ -199,7 +199,7 @@ def handle_telegram_command(token, chat_id, user_name, text):
             "<code>/add https://www.zara.com/es/es/... M</code>\n\n"
             "• <code>/list</code> : Ver tus prendas en seguimiento y su estado.\n"
             "• <code>/del &lt;número&gt;</code> : Dejar de seguir una prenda (ej: <code>/del 1</code>).\n"
-            "• <code>/test</code> : Enviar una alerta de prueba a este chat."
+            "• <code>/prueba</code> o <code>/test</code> : Comprobar que recibes avisos y que todo funciona correctamente."
         )
         send_telegram(token, chat_id, help_msg)
 
@@ -250,12 +250,21 @@ def handle_telegram_command(token, chat_id, user_name, text):
         else:
             send_telegram(token, chat_id, f"⚠️ Número no válido. Tienes {len(user_items)} prendas en /list.")
 
-    elif cmd in ("/test", "test"):
-        send_telegram(
-            token, chat_id,
-            "🔔 <b>¡Test de Alerta Correcto!</b>\n"
-            "Tu bot está activo y te enviará un aviso inmediato en cuanto haya restock en Zara, Bershka o Pull&Bear."
+    elif cmd in ("/prueba", "/test", "prueba", "test"):
+        test_msg = (
+            "🔔 <b>¡PRUEBA DE FUNCIONAMIENTO EXITOSA!</b> 🔔\n\n"
+            "🟢 <b>Estado del bot:</b> 100% Operativo y Conectado\n"
+            "🏪 <b>Tiendas soportadas:</b> Zara, Bershka y Pull&Bear\n"
+            "⏱️ <b>Frecuencia de escaneo:</b> Cada 1 minuto (60s)\n"
+            f"📱 <b>Tu ID de usuario:</b> <code>{chat_id}</code>\n\n"
+            "🚨 <i>Ejemplo de cómo te llegará una alerta real:</i>\n"
+            "Prenda: <b>Cárdigan cremallera Dickies</b>\n"
+            "Talla: <b>XS DISPONIBLE ✅</b>\n"
+            "Precio: <b>45.99 €</b>\n\n"
+            "🛒 <a href='https://www.pullandbear.com/es/cardigan-cremallera-dickies-l07563305?cS=712'><b>PULSA AQUÍ PARA COMPRAR</b></a>\n\n"
+            "✨ <i>Todo está listo. Escribe /list para ver tus prendas o /add para añadir nuevas.</i>"
         )
+        send_telegram(token, chat_id, test_msg)
 
     elif cmd in ("/add", "/alerta", "/crear"):
         if len(parts) < 3:

@@ -3,19 +3,19 @@
   "target_size": "XS",
   "check_interval_seconds": 5,
   "refresh_page_interval_minutes": 15,
-  "headless": false,
+  "headless": true,
   "user_data_dir": "./chrome_profile",
   "auto_add_to_cart": true,
   "auto_open_checkout": true,
   "sound_alarm": true,
   "windows_notification": true,
   "telegram": {
-    "enabled": false,
-    "bot_token": "TU_BOT_TOKEN_AQUI",
-    "chat_id": "TU_CHAT_ID_AQUI"
+    "enabled": true,
+    "bot_token": "8745818951:AAEHN0Xsw6Ki5lPiSUxPrUV7LbVfndRjR-c",
+    "chat_id": "1997921776"
   },
   "discord": {
     "enabled": false,
-    "webhook_url": "TU_DISCORD_WEBHOOK_AQUI"
+    "webhook_url": ""
   }
 }

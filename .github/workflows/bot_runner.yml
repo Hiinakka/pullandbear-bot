@@ -1,0 +1,42 @@
+name: Pull&Bear Restock Bot 24/7
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Runs automatically every 4 hours to ensure continuous 24/7 monitoring
+    - cron: '0 */4 * * *'
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 # Max 5.8 hours per run
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar Google Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget curl
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Instalar dependencias Python
+        run: |
+          pip install --no-cache-dir selenium requests
+
+      - name: Configurar modo servidor headless
+        run: |
+          python -c "import json; c=json.load(open('config.json')); c['headless']=True; json.dump(c, open('config.json', 'w'), indent=2)"
+
+      - name: Ejecutar Bot de Restock
+        run: |
+          python bot.py

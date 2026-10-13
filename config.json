@@ -1,0 +1,21 @@
+{
+  "product_url": "https://www.pullandbear.com/es/cardigan-cremallera-dickies-l07563305?cS=712",
+  "target_size": "XS",
+  "check_interval_seconds": 5,
+  "refresh_page_interval_minutes": 15,
+  "headless": false,
+  "user_data_dir": "./chrome_profile",
+  "auto_add_to_cart": true,
+  "auto_open_checkout": true,
+  "sound_alarm": true,
+  "windows_notification": true,
+  "telegram": {
+    "enabled": false,
+    "bot_token": "TU_BOT_TOKEN_AQUI",
+    "chat_id": "TU_CHAT_ID_AQUI"
+  },
+  "discord": {
+    "enabled": false,
+    "webhook_url": "TU_DISCORD_WEBHOOK_AQUI"
+  }
+}

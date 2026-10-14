@@ -103,19 +103,55 @@ def play_sound_alarm():
         logger.warning(f"No se pudo reproducir sonido de alarma: {e}")
 
 
-def send_telegram(token, chat_id, message):
-    """Sends notification to a specific Telegram chat_id."""
+def send_telegram(token, chat_id, message, reply_markup=None):
+    """Sends notification to a specific Telegram chat_id with optional inline keyboard."""
     if not token or not chat_id:
         return
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = json.dumps({"chat_id": chat_id, "text": message, "parse_mode": "HTML"}).encode("utf-8")
+        payload_dict = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
+        if reply_markup:
+            payload_dict["reply_markup"] = reply_markup
+        payload = json.dumps(payload_dict).encode("utf-8")
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             if resp.status == 200:
                 logger.info(f"Mensaje Telegram enviado con éxito a {chat_id}.")
     except Exception as e:
         logger.error(f"Error enviando Telegram a {chat_id}: {e}")
+
+
+def answer_callback_query(token, callback_query_id, text=None, show_alert=False):
+    """Answers a Telegram callback query to dismiss loading state or show toast."""
+    try:
+        url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+            payload["show_alert"] = show_alert
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            pass
+    except Exception as e:
+        logger.warning(f"Error respondiendo callback_query: {e}")
+
+
+def edit_message_reply_markup(token, chat_id, message_id, reply_markup=None):
+    """Edits the inline keyboard of an existing message."""
+    try:
+        url = f"https://api.telegram.org/bot{token}/editMessageReplyMarkup"
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": reply_markup or {"inline_keyboard": []}
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            pass
+    except Exception as e:
+        logger.warning(f"Error editando reply_markup: {e}")
 
 
 def load_config():
@@ -250,6 +286,20 @@ def telegram_listener_thread(config):
                 data = json.loads(resp.read().decode("utf-8"))
                 for update in data.get("result", []):
                     offset = update["update_id"] + 1
+
+                    # 1. Callback query from inline button (like the delete dropdown button)
+                    cb_query = update.get("callback_query")
+                    if cb_query:
+                        from_u = cb_query.get("from", {})
+                        cid = str(from_u.get("id", ""))
+                        uname = from_u.get("first_name", "Usuario")
+                        uhandle = from_u.get("username", "")
+                        if cid:
+                            register_user(cid, uname, uhandle)
+                        handle_telegram_callback(token, cb_query)
+                        continue
+
+                    # 2. Regular message
                     msg = update.get("message", {})
                     chat_id = str(msg.get("chat", {}).get("id", ""))
                     user_name = msg.get("from", {}).get("first_name", "Usuario")
@@ -264,6 +314,86 @@ def telegram_listener_thread(config):
         except Exception as e:
             time.sleep(3)
         time.sleep(1)
+
+
+def handle_telegram_callback(token, cb):
+    """Handles inline button clicks (e.g. deleting an alert directly from a restock notification)."""
+    cb_id = cb.get("id")
+    data = cb.get("data", "")
+    from_user = cb.get("from", {})
+    chat_id = str(from_user.get("id", ""))
+    msg = cb.get("message", {})
+    message_id = msg.get("message_id")
+
+    if not chat_id:
+        return
+
+    if data == "none":
+        answer_callback_query(token, cb_id)
+        return
+
+    if data == "test_del":
+        answer_callback_query(token, cb_id, text="🗑️ ¡Ejemplo de borrado completado!")
+        updated_kb = {
+            "inline_keyboard": [
+                [{"text": "🛒 Enlace de ejemplo", "url": "https://www.pullandbear.com/es/cardigan-cremallera-dickies-l07563305?cS=712"}],
+                [{"text": "✅ Alerta borrada (Prueba)", "callback_data": "none"}]
+            ]
+        }
+        edit_message_reply_markup(token, chat_id, message_id, updated_kb)
+        send_telegram(token, chat_id, "🗑️ <i>(Prueba)</i> Has pulsado el botón para borrar esta alerta.")
+        return
+
+    if data.startswith("del_"):
+        try:
+            item_id = int(data.replace("del_", ""))
+        except ValueError:
+            answer_callback_query(token, cb_id, text="⚠️ ID no reconocido.")
+            return
+
+        alerts = load_alerts()
+        target_item = None
+        for a in alerts:
+            if a.get("id") == item_id:
+                target_item = a
+                break
+
+        if target_item:
+            item_name = target_item.get("name", "Prenda")
+            item_size = target_item.get("size", "")
+            if chat_id in target_item.get("chat_ids", []):
+                target_item["chat_ids"].remove(chat_id)
+                if not target_item.get("chat_ids"):
+                    alerts = [x for x in alerts if x.get("id") != item_id]
+                save_alerts(alerts)
+
+                answer_callback_query(token, cb_id, text=f"🗑️ Dejaste de seguir: {item_name} ({item_size})")
+
+                # Update inline keyboard in original notification message
+                updated_kb = {
+                    "inline_keyboard": [
+                        [{"text": "🛒 Ver Prenda en Tienda", "url": target_item.get("url", "#")}],
+                        [{"text": "✅ Borrada de tu lista", "callback_data": "none"}]
+                    ]
+                }
+                edit_message_reply_markup(token, chat_id, message_id, updated_kb)
+                send_telegram(token, chat_id, f"🗑️ Has eliminado de tu lista: <b>{item_name}</b> (Talla {item_size}).\nYa no recibirás más notificaciones de este artículo.")
+            else:
+                answer_callback_query(token, cb_id, text="ℹ️ Ya no tenías esta prenda en seguimiento.")
+                updated_kb = {
+                    "inline_keyboard": [
+                        [{"text": "ℹ️ Ya no está en tu lista", "callback_data": "none"}]
+                    ]
+                }
+                edit_message_reply_markup(token, chat_id, message_id, updated_kb)
+        else:
+            answer_callback_query(token, cb_id, text="ℹ️ Esta alerta ya no existe o ya fue borrada.")
+            updated_kb = {
+                "inline_keyboard": [
+                    [{"text": "ℹ️ Alerta ya eliminada", "callback_data": "none"}]
+                ]
+            }
+            edit_message_reply_markup(token, chat_id, message_id, updated_kb)
 
 
 def handle_telegram_message(token, chat_id, user_name, text):
@@ -371,10 +501,19 @@ def handle_telegram_message(token, chat_id, user_name, text):
             "Prenda: <b>Cárdigan cremallera Dickies</b>\n"
             "Talla: <b>XS DISPONIBLE ✅</b>\n"
             "Precio: <b>45.99 €</b>\n\n"
-            "🛒 <a href='https://www.pullandbear.com/es/cardigan-cremallera-dickies-l07563305?cS=712'><b>PULSA AQUÍ PARA COMPRAR</b></a>\n\n"
-            "✨ <i>Todo funciona de diez. Escribe /list para ver tus prendas o añade una nueva.</i>"
+            "💡 <i>Pulsa los botones interactivos de abajo para comprar o borrar la prenda en 1 toque:</i>"
         )
-        send_telegram(token, chat_id, test_msg)
+        test_keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "🛒 Comprar Prenda", "url": "https://www.pullandbear.com/es/cardigan-cremallera-dickies-l07563305?cS=712"}
+                ],
+                [
+                    {"text": "🗑️ Borrar este artículo de mi lista", "callback_data": "test_del"}
+                ]
+            ]
+        }
+        send_telegram(token, chat_id, test_msg, reply_markup=test_keyboard)
         return
 
     if cmd_token in ("/list", "/status", "lista", "status"):
@@ -597,11 +736,20 @@ def main():
                                 f"🚨 <b>¡RESTOCK EN {store.upper()}!</b> 🚨\n\n"
                                 f"<b>Prenda:</b> {name}\n"
                                 f"<b>Talla:</b> {size} DISPONIBLE ✅\n"
-                                f"<b>Precio:</b> {price}\n\n"
-                                f"🛒 <a href='{final_url}'><b>PULSA AQUÍ PARA COMPRAR</b></a>\n"
+                                f"<b>Precio:</b> {price}\n"
                             )
+                            keyboard = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "🛒 Comprar Prenda", "url": final_url}
+                                    ],
+                                    [
+                                        {"text": "🗑️ Borrar este artículo de mi lista", "callback_data": f"del_{item_id}"}
+                                    ]
+                                ]
+                            }
                             for cid in chat_ids:
-                                send_telegram(token, cid, msg)
+                                send_telegram(token, cid, msg, reply_markup=keyboard)
 
                 except Exception as e:
                     logger.warning(f"Error comprobando [{store}] {url}: {e}")

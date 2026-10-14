@@ -20,6 +20,8 @@ Bot inteligente para monitorizar reposiciones de stock en tiempo real en **Pull&
    * Inditex (Pull&Bear, Zara, etc.) marca internamente `isBuyable: True` en prendas sin stock real. El bot filtra estrictamente este comportamiento para avisar **solo** cuando la talla esté realmente disponible para comprar.
 6. **Soporte multi-usuario completo:**
    * Cada usuario gestiona sus alertas de forma privada con su propio Telegram.
+7. **Botones interactivos en avisos:**
+   * Cada notificación de restock incluye botones debajo para comprar directamente o **borrar la prenda de tu lista** en un solo toque sin escribir comandos.
 
 ---
 

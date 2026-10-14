@@ -92,17 +92,12 @@ def broadcast_update(message_html):
 
 if __name__ == "__main__":
     default_msg = (
-        "🚀 <b>¡ACTUALIZACIÓN DEL BOT APLICADA!</b> 🚀\n\n"
-        "✨ <b>Novedades de esta versión:</b>\n"
-        "• 🏪 <b>Nuevas tiendas añadidas:</b> Stradivarius, Mango y H&M (HyM).\n"
-        "• ⏱️ <b>Escaneo cada 5 segundos:</b> Comprobaciones ultra-rápidas para cazar stock al instante.\n"
-        "• 🛡️ <b>Falso restock corregido:</b> Solucionado el bug de <code>isBuyable</code> de Inditex; nunca más te avisará si está en <code>SOLD_OUT</code>.\n"
-        "• 🎨 <b>Filtro por color exacto:</b> Ahora detecta la variante de color exacta del enlace.\n\n"
-        "👗 <b>Prueba a añadir prendas de las nuevas tiendas:</b>\n"
-        "• <code>stradivarius 0453/642 36</code>\n"
-        "• <code>mango 37045842 M</code>\n"
-        "• <code>hym 1324742001 S</code>\n\n"
-        "Escribe <code>/list</code> para ver tus alertas activas o <code>/help</code> para ver todos los comandos."
+        "🚀 <b>¡NUEVA ACTUALIZACIÓN DEL TRACKER DE ROPA!</b> 🚀\n\n"
+        "✨ <b>Novedad: Botón interactivo para borrar artículos</b>\n"
+        "• 🗑️ <b>Borrado en 1 toque:</b> Cada notificación de restock ahora incluye un botón debajo para <b>dejar de vigilar el artículo</b> al instante sin tener que escribir comandos.\n"
+        "• 🛒 <b>Botón de compra directa:</b> Abre la prenda en la tienda en un solo toque.\n"
+        "• ⚡ <b>Respuesta interactiva:</b> Al pulsar el botón, el bot te confirma el borrado y actualiza el anuncio automáticamente.\n\n"
+        "Escribe <code>/prueba</code> para ver un ejemplo o <code>/list</code> para ver tus prendas."
     )
     msg = sys.argv[1] if len(sys.argv) > 1 else default_msg
     broadcast_update(msg)

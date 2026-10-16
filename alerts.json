@@ -1,1 +1,16 @@
-[]
+[
+  {
+    "id": 1,
+    "store": "pullandbear",
+    "name": "Prenda Pullandbear",
+    "url": "https://www.pullandbear.com/es/search?searchTerm=7563901429",
+    "ref": "7563901429",
+    "size": "S",
+    "status": "Comprobando...",
+    "price": "Consultando...",
+    "chat_ids": [
+      "1888853817"
+    ],
+    "last_checked": null
+  }
+]

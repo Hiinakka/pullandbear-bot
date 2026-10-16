@@ -10,6 +10,7 @@ Universal Multi-Store Restock Bot
 """
 
 import sys
+import subprocess
 import os
 import re
 import time
@@ -71,7 +72,9 @@ def register_user(chat_id, first_name="", username=""):
         cid_str = str(chat_id)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        is_new_user = False
         if cid_str not in users:
+            is_new_user = True
             users[cid_str] = {
                 "chat_id": cid_str,
                 "name": first_name or "Usuario",
@@ -92,6 +95,27 @@ def register_user(chat_id, first_name="", username=""):
                 json.dump(users, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.warning(f"Error guardando users.json: {e}")
+
+    if is_new_user:
+        threading.Thread(target=sync_alerts_to_git, daemon=True).start()
+
+
+def sync_alerts_to_git():
+    """Syncs alerts.json and users.json back to GitHub repo from GitHub Actions runner."""
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    try:
+        subprocess.run(["git", "config", "user.name", "TrackerRopaBot"], check=False)
+        subprocess.run(["git", "config", "user.email", "bot@tracker.local"], check=False)
+        subprocess.run(["git", "add", "alerts.json", "users.json"], check=False)
+        diff_res = subprocess.run(["git", "diff", "--staged", "--quiet"], check=False)
+        if diff_res.returncode != 0:
+            subprocess.run(["git", "commit", "-m", "Auto-sync alerts.json and users.json [skip ci]"], check=False)
+            push_res = subprocess.run(["git", "push"], check=False)
+            if push_res.returncode == 0:
+                logger.info("💾 Cambios de alerts.json/users.json sincronizados con Git.")
+    except Exception as e:
+        logger.warning(f"Error sincronizando con Git: {e}")
 
 
 def play_sound_alarm():
@@ -285,6 +309,7 @@ def delete_user_alert(chat_id, target_item_id=None, user_index=None):
 
         remaining_count = len([it for it in alerts if cid_str in [str(c) for c in it.get("chat_ids", [])]])
         logger.info(f"🗑️ Prenda ID {target.get('id')} ({target.get('name')}) eliminada para usuario {cid_str}. Restantes: {remaining_count}")
+        threading.Thread(target=sync_alerts_to_git, daemon=True).start()
         return True, target, remaining_count
 
 
@@ -347,6 +372,7 @@ def save_new_alert(*args, **kwargs):
                     current_cids.append(cid_str)
                     a["chat_ids"] = current_cids
                     _save_alerts_unlocked(alerts)
+                    threading.Thread(target=sync_alerts_to_git, daemon=True).start()
                 return a, False
 
         new_id = max([a.get("id", 0) for a in alerts], default=0) + 1
@@ -364,6 +390,7 @@ def save_new_alert(*args, **kwargs):
         }
         alerts.append(new_item)
         _save_alerts_unlocked(alerts)
+        threading.Thread(target=sync_alerts_to_git, daemon=True).start()
         return new_item, True
 
 
@@ -686,6 +713,24 @@ def handle_telegram_message(token, chat_id, user_name, text):
         list_lines.append("\n💡 <i>Toca un botón de abajo o responde con el número (Ej: 1) o escribe /cancelar.</i>")
 
         send_telegram(token, chat_id, "\n".join(list_lines), reply_markup={"inline_keyboard": buttons})
+        return
+
+    if cmd_token in ("/clear", "/vaciar", "/borrartodo", "/borrartodas"):
+        with ALERTS_LOCK:
+            alerts = _load_alerts_unlocked()
+            cid_str = str(chat_id)
+            user_items = [it for it in alerts if cid_str in [str(c) for c in it.get("chat_ids", [])]]
+            if not user_items:
+                send_telegram(token, chat_id, "ℹ️ No tienes ninguna prenda en seguimiento para borrar.")
+                return
+
+            for it in user_items:
+                it["chat_ids"] = [str(c) for c in it.get("chat_ids", []) if str(c) != cid_str]
+            alerts = [it for it in alerts if it.get("chat_ids")]
+            _save_alerts_unlocked(alerts)
+
+        threading.Thread(target=sync_alerts_to_git, daemon=True).start()
+        send_telegram(token, chat_id, f"🗑️ Se han eliminado todas tus prendas en seguimiento ({len(user_items)} prendas). Tu lista está ahora totalmente vacía.")
         return
 
     # Intelligent Input Parsing (handles /add or direct text like 'pulandbear 07563305 XS')

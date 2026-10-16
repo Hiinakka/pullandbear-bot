@@ -293,13 +293,18 @@ def check_item_stock(driver, store, product_url, target_size="XS"):
             let price = priceEl ? priceEl.innerText.trim() : "";
             
             let found = null;
-            document.querySelectorAll('button, li, span, [data-qa-action="size-selector-list-item"], [data-testid*="size"]').forEach(el => {{
-                let txt = (el.innerText || "").trim().toUpperCase();
+            let sizeEls = document.querySelectorAll('[data-qa-action="size-selector-list-item"], [data-testid*="size-button"], [data-testid*="size-item"], [data-testid*="size"], [class*="size-list"] button, [class*="size-selector"] button, [class*="sizes-list"] button, [class*="product-size"] button, [class*="size-item"], [role="radio"][aria-label*="size" i], [role="radio"]');
+            if (!sizeEls || sizeEls.length === 0) {{
+                sizeEls = document.querySelectorAll('button[class*="size" i], button[data-size], li[class*="size" i] button');
+            }}
+            sizeEls.forEach(el => {{
+                let txt = (el.innerText || el.getAttribute('aria-label') || "").trim().toUpperCase();
                 txt = txt.replace(/^(TALLA|LA|UNA)\\s+/, '');
-                if (txt === target || txt.startsWith(target + "\\n") || txt.startsWith(target + " ")) {{
+                if (txt === target || txt.startsWith(target + "\\n") || txt.startsWith(target + " ") || txt.endsWith(" " + target)) {{
                     let cls = (el.className || "").toLowerCase();
                     let ariaDis = el.getAttribute('aria-disabled');
-                    let isDis = el.disabled || ariaDis === "true" || cls.includes('disabled') || cls.includes('out-of-stock') || cls.includes('is-soldout') || cls.includes('unavailable');
+                    let hasSvgStrike = el.querySelector('svg, line, path[class*="strike"]') !== null;
+                    let isDis = el.disabled || ariaDis === "true" || cls.includes('disabled') || cls.includes('out-of-stock') || cls.includes('is-soldout') || cls.includes('unavailable') || cls.includes('sold-out') || cls.includes('is-disabled') || hasSvgStrike;
                     found = {{
                         size: target,
                         isOutOfStock: isDis

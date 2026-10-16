@@ -1,10 +1,16 @@
 name: Pull&Bear Restock Bot 24/7
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
   schedule:
     # Runs automatically every 4 hours to ensure continuous 24/7 monitoring
     - cron: '0 */4 * * *'
+
+concurrency:
+  group: bot-runner
+  cancel-in-progress: true
 
 jobs:
   monitor:

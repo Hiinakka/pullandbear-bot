@@ -25,6 +25,12 @@ from selenium.webdriver.chrome.options import Options
 
 import store_checker
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -46,6 +52,7 @@ USER_STATES = {}    # chat_id -> dict(state, store, ref_or_url, timestamp)
 
 
 USERS_LOCK = threading.Lock()
+ALERTS_LOCK = threading.Lock()
 
 
 def register_user(chat_id, first_name="", username=""):
@@ -176,8 +183,8 @@ def load_config():
     return defaults
 
 
-def load_alerts():
-    """Loads tracked items from alerts.json, filtering out any invalid links."""
+def _load_alerts_unlocked():
+    """Loads tracked items from alerts.json (must already hold ALERTS_LOCK)."""
     if os.path.exists(ALERTS_PATH):
         try:
             with open(ALERTS_PATH, "r", encoding="utf-8") as f:
@@ -186,8 +193,8 @@ def load_alerts():
                 for item in data:
                     if "onetrust" in item.get("url", "").lower() or "consent" in item.get("name", "").lower():
                         continue
-                    if "chat_ids" not in item:
-                        item["chat_ids"] = ["1997921776"]
+                    raw_cids = item.get("chat_ids", ["1997921776"])
+                    item["chat_ids"] = [str(c) for c in raw_cids]
                     clean_data.append(item)
                 return clean_data
         except Exception as e:
@@ -195,13 +202,90 @@ def load_alerts():
     return []
 
 
-def save_alerts(alerts):
-    """Saves tracked items to alerts.json."""
+def _save_alerts_unlocked(alerts):
+    """Saves tracked items to alerts.json (must already hold ALERTS_LOCK)."""
     try:
         with open(ALERTS_PATH, "w", encoding="utf-8") as f:
             json.dump(alerts, f, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error guardando alerts.json: {e}")
+
+
+def load_alerts():
+    """Loads tracked items from alerts.json thread-safely."""
+    with ALERTS_LOCK:
+        return _load_alerts_unlocked()
+
+
+def save_alerts(alerts):
+    """Saves tracked items to alerts.json thread-safely."""
+    with ALERTS_LOCK:
+        _save_alerts_unlocked(alerts)
+
+
+def update_item_status(item_id, name, price, status, final_url, last_checked):
+    """
+    Safely updates an item's status in alerts.json.
+    Crucial: If the item was deleted by the user while being checked,
+    it will NOT be resurrected. Returns updated item dict or None.
+    """
+    with ALERTS_LOCK:
+        alerts = _load_alerts_unlocked()
+        target = None
+        for item in alerts:
+            if item.get("id") == item_id:
+                target = item
+                break
+
+        if not target:
+            logger.info(f"Prenda ID {item_id} no existe en alerts.json (borrada por el usuario). No se guardará.")
+            return None
+
+        target["name"] = name
+        target["price"] = price
+        target["status"] = status
+        target["url"] = final_url
+        target["last_checked"] = last_checked
+        _save_alerts_unlocked(alerts)
+        return target
+
+
+def delete_user_alert(chat_id, target_item_id=None, user_index=None):
+    """
+    Thread-safely removes chat_id from target item's chat_ids.
+    If no subscribers remain, completely removes the item from alerts.json.
+    Returns (success: bool, deleted_item: dict or None, remaining_user_items_count: int).
+    """
+    with ALERTS_LOCK:
+        alerts = _load_alerts_unlocked()
+        cid_str = str(chat_id)
+        user_items = [it for it in alerts if cid_str in [str(c) for c in it.get("chat_ids", [])]]
+
+        target = None
+        if target_item_id is not None:
+            for it in user_items:
+                if it.get("id") == target_item_id:
+                    target = it
+                    break
+        elif user_index is not None:
+            if 0 <= user_index < len(user_items):
+                target = user_items[user_index]
+
+        if not target:
+            return False, None, len(user_items)
+
+        # Remove chat_id from target item
+        target["chat_ids"] = [str(c) for c in target.get("chat_ids", []) if str(c) != cid_str]
+
+        # If no users are following this item anymore, purge it completely
+        if not target["chat_ids"]:
+            alerts = [it for it in alerts if it.get("id") != target.get("id")]
+
+        _save_alerts_unlocked(alerts)
+
+        remaining_count = len([it for it in alerts if cid_str in [str(c) for c in it.get("chat_ids", [])]])
+        logger.info(f"🗑️ Prenda ID {target.get('id')} ({target.get('name')}) eliminada para usuario {cid_str}. Restantes: {remaining_count}")
+        return True, target, remaining_count
 
 
 def create_driver(config):
@@ -236,35 +320,51 @@ def create_driver(config):
     return driver
 
 
-def save_new_alert(alerts, store, ref_or_url, size, chat_id):
-    """Helper to register a new alert in alerts.json."""
+def save_new_alert(*args, **kwargs):
+    """Helper to register a new alert in alerts.json thread-safely."""
+    if len(args) == 5 and isinstance(args[0], list):
+        _, store, ref_or_url, size, chat_id = args
+    elif len(args) == 4:
+        store, ref_or_url, size, chat_id = args
+    else:
+        store = kwargs.get("store")
+        ref_or_url = kwargs.get("ref_or_url")
+        size = kwargs.get("size")
+        chat_id = kwargs.get("chat_id")
+
     size = store_checker.normalize_size(size)
     url = store_checker.build_search_or_product_url(store, ref_or_url)
-    
-    # Check if item + size is already tracked
-    for a in alerts:
-        if a.get("store") == store and a.get("size") == size and (a.get("ref") == ref_or_url or a.get("url") == url):
-            if chat_id not in a.get("chat_ids", []):
-                a.setdefault("chat_ids", []).append(chat_id)
-                save_alerts(alerts)
-            return a, False
+    cid_str = str(chat_id)
 
-    new_id = max([a.get("id", 0) for a in alerts], default=0) + 1
-    new_item = {
-        "id": new_id,
-        "store": store,
-        "name": f"Prenda {store.capitalize()}",
-        "url": url,
-        "ref": ref_or_url,
-        "size": size,
-        "status": "Comprobando...",
-        "price": "Consultando...",
-        "chat_ids": [chat_id],
-        "last_checked": None
-    }
-    alerts.append(new_item)
-    save_alerts(alerts)
-    return new_item, True
+    with ALERTS_LOCK:
+        alerts = _load_alerts_unlocked()
+
+        # Check if item + size is already tracked
+        for a in alerts:
+            if a.get("store") == store and a.get("size") == size and (a.get("ref") == ref_or_url or a.get("url") == url):
+                current_cids = [str(c) for c in a.get("chat_ids", [])]
+                if cid_str not in current_cids:
+                    current_cids.append(cid_str)
+                    a["chat_ids"] = current_cids
+                    _save_alerts_unlocked(alerts)
+                return a, False
+
+        new_id = max([a.get("id", 0) for a in alerts], default=0) + 1
+        new_item = {
+            "id": new_id,
+            "store": store,
+            "name": f"Prenda {store.capitalize()}",
+            "url": url,
+            "ref": ref_or_url,
+            "size": size,
+            "status": "Comprobando...",
+            "price": "Consultando...",
+            "chat_ids": [cid_str],
+            "last_checked": None
+        }
+        alerts.append(new_item)
+        _save_alerts_unlocked(alerts)
+        return new_item, True
 
 
 def telegram_listener_thread(config):
@@ -332,6 +432,19 @@ def handle_telegram_callback(token, cb):
         answer_callback_query(token, cb_id)
         return
 
+    if data == "cancel_del":
+        USER_STATES.pop(chat_id, None)
+        answer_callback_query(token, cb_id, text="❌ Borrado cancelado.")
+        if message_id:
+            updated_kb = {
+                "inline_keyboard": [
+                    [{"text": "❌ Borrado cancelado", "callback_data": "none"}]
+                ]
+            }
+            edit_message_reply_markup(token, chat_id, message_id, updated_kb)
+        send_telegram(token, chat_id, "❌ Operación de borrado cancelada.")
+        return
+
     if data == "test_del":
         answer_callback_query(token, cb_id, text="🗑️ ¡Ejemplo de borrado completado!")
         updated_kb = {
@@ -340,7 +453,8 @@ def handle_telegram_callback(token, cb):
                 [{"text": "✅ Alerta borrada (Prueba)", "callback_data": "none"}]
             ]
         }
-        edit_message_reply_markup(token, chat_id, message_id, updated_kb)
+        if message_id:
+            edit_message_reply_markup(token, chat_id, message_id, updated_kb)
         send_telegram(token, chat_id, "🗑️ <i>(Prueba)</i> Has pulsado el botón para borrar esta alerta.")
         return
 
@@ -351,49 +465,38 @@ def handle_telegram_callback(token, cb):
             answer_callback_query(token, cb_id, text="⚠️ ID no reconocido.")
             return
 
-        alerts = load_alerts()
-        target_item = None
-        for a in alerts:
-            if a.get("id") == item_id:
-                target_item = a
-                break
+        success, target_item, remaining = delete_user_alert(chat_id, target_item_id=item_id)
+        USER_STATES.pop(chat_id, None)
 
-        if target_item:
+        if success and target_item:
             item_name = target_item.get("name", "Prenda")
             item_size = target_item.get("size", "")
-            if chat_id in target_item.get("chat_ids", []):
-                target_item["chat_ids"].remove(chat_id)
-                if not target_item.get("chat_ids"):
-                    alerts = [x for x in alerts if x.get("id") != item_id]
-                save_alerts(alerts)
+            answer_callback_query(token, cb_id, text=f"🗑️ Dejaste de seguir: {item_name} ({item_size})")
 
-                answer_callback_query(token, cb_id, text=f"🗑️ Dejaste de seguir: {item_name} ({item_size})")
-
-                # Update inline keyboard in original notification message
-                updated_kb = {
-                    "inline_keyboard": [
-                        [{"text": "🛒 Ver Prenda en Tienda", "url": target_item.get("url", "#")}],
-                        [{"text": "✅ Borrada de tu lista", "callback_data": "none"}]
-                    ]
-                }
-                edit_message_reply_markup(token, chat_id, message_id, updated_kb)
-                send_telegram(token, chat_id, f"🗑️ Has eliminado de tu lista: <b>{item_name}</b> (Talla {item_size}).\nYa no recibirás más notificaciones de este artículo.")
-            else:
-                answer_callback_query(token, cb_id, text="ℹ️ Ya no tenías esta prenda en seguimiento.")
-                updated_kb = {
-                    "inline_keyboard": [
-                        [{"text": "ℹ️ Ya no está en tu lista", "callback_data": "none"}]
-                    ]
-                }
-                edit_message_reply_markup(token, chat_id, message_id, updated_kb)
-        else:
-            answer_callback_query(token, cb_id, text="ℹ️ Esta alerta ya no existe o ya fue borrada.")
+            # Update inline keyboard in original notification message
             updated_kb = {
                 "inline_keyboard": [
-                    [{"text": "ℹ️ Alerta ya eliminada", "callback_data": "none"}]
+                    [{"text": "🛒 Ver Prenda en Tienda", "url": target_item.get("url", "#")}],
+                    [{"text": "✅ Borrada de tu lista", "callback_data": "none"}]
                 ]
             }
-            edit_message_reply_markup(token, chat_id, message_id, updated_kb)
+            if message_id:
+                edit_message_reply_markup(token, chat_id, message_id, updated_kb)
+            send_telegram(
+                token, chat_id,
+                f"🗑️ Has eliminado de tu lista: <b>{item_name}</b> (Talla {item_size}).\n"
+                f"Ya no recibirás más notificaciones de este artículo. (Prendas activas: {remaining})"
+            )
+        else:
+            answer_callback_query(token, cb_id, text="ℹ️ Esta prenda ya no estaba en tu lista o ya fue borrada.")
+            updated_kb = {
+                "inline_keyboard": [
+                    [{"text": "ℹ️ Ya no está en tu lista", "callback_data": "none"}]
+                ]
+            }
+            if message_id:
+                edit_message_reply_markup(token, chat_id, message_id, updated_kb)
+        return
 
 
 def handle_telegram_message(token, chat_id, user_name, text):
@@ -430,7 +533,7 @@ def handle_telegram_message(token, chat_id, user_name, text):
             ref_or_url = user_state["ref_or_url"]
             USER_STATES.pop(chat_id, None)
 
-            item, is_new = save_new_alert(alerts, store, ref_or_url, chosen_size, chat_id)
+            item, is_new = save_new_alert(store, ref_or_url, chosen_size, chat_id)
             send_telegram(
                 token, chat_id,
                 f"✅ <b>¡Alerta guardada con éxito!</b>\n\n"
@@ -444,20 +547,21 @@ def handle_telegram_message(token, chat_id, user_name, text):
         # State: waiting for delete index
         if state_type == "WAITING_FOR_DELETE":
             USER_STATES.pop(chat_id, None)
-            user_items = [item for item in alerts if chat_id in item.get("chat_ids", [])]
             num_match = re.search(r'\d+', clean_text)
             if num_match:
                 idx = int(num_match.group()) - 1
-                if 0 <= idx < len(user_items):
-                    target_item = user_items[idx]
-                    if chat_id in target_item.get("chat_ids", []):
-                        target_item["chat_ids"].remove(chat_id)
-                    if not target_item.get("chat_ids"):
-                        alerts = [x for x in alerts if x.get("id") != target_item.get("id")]
-                    save_alerts(alerts)
-                    send_telegram(token, chat_id, f"🗑️ Has dejado de seguir: <b>{target_item.get('name', 'Prenda')}</b> (Talla {target_item.get('size')}).")
+                success, target_item, remaining = delete_user_alert(chat_id, user_index=idx)
+                if success and target_item:
+                    send_telegram(
+                        token, chat_id,
+                        f"🗑️ Has dejado de seguir: <b>{target_item.get('name', 'Prenda')}</b> (Talla {target_item.get('size')}).\n"
+                        f"Te quedan {remaining} prendas en seguimiento."
+                    )
                     return
-            send_telegram(token, chat_id, "⚠️ Número no reconocido. Operación cancelada. Consulta tu lista con <code>/list</code>.")
+                else:
+                    send_telegram(token, chat_id, "⚠️ Número no válido o fuera de rango. Consulta tu lista con <code>/list</code>.")
+                    return
+            send_telegram(token, chat_id, "⚠️ No reconocí ningún número. Operación cancelada. Consulta tu lista con <code>/list</code>.")
             return
 
     # Standard Commands
@@ -517,7 +621,8 @@ def handle_telegram_message(token, chat_id, user_name, text):
         return
 
     if cmd_token in ("/list", "/status", "lista", "status"):
-        user_items = [item for item in alerts if chat_id in item.get("chat_ids", [])]
+        current_alerts = load_alerts()
+        user_items = [item for item in current_alerts if str(chat_id) in [str(c) for c in item.get("chat_ids", [])]]
         if not user_items:
             send_telegram(token, chat_id, "ℹ️ No tienes ninguna prenda en seguimiento todavía.\n\nPuedes añadir una escribiendo:\n<code>pulandbear 07563305 XS</code>")
             return
@@ -530,46 +635,57 @@ def handle_telegram_message(token, chat_id, user_name, text):
             status = item.get("status", "Comprobando...")
             price = item.get("price", "")
             icon = "✅ DISPONIBLE" if status not in ("SOLD_OUT", "Comprobando...", "UNKNOWN") else "❌ AGOTADO"
-            
+
             lines.append(
                 f"<b>{idx}. [{store_name}] {name}</b>\n"
                 f"   Talla: <b>{size}</b> | Estado: {icon}\n"
                 f"   Precio: {price}\n"
                 f"   🔗 <a href='{item.get('url')}'>Ver en Tienda</a>\n"
             )
-        lines.append("<i>Para borrar una prenda usa /del &lt;número&gt;</i>")
+        lines.append("<i>Para borrar una prenda usa <code>/del</code> o escribe <code>/del &lt;número&gt;</code></i>")
         send_telegram(token, chat_id, "\n".join(lines))
         return
 
     if cmd_token in ("/del", "/delete", "/borrar", "/eliminar"):
-        user_items = [item for item in alerts if chat_id in item.get("chat_ids", [])]
+        current_alerts = load_alerts()
+        user_items = [item for item in current_alerts if str(chat_id) in [str(c) for c in item.get("chat_ids", [])]]
         if not user_items:
-            send_telegram(token, chat_id, "ℹ️ No tienes ninguna prenda para borrar.")
+            send_telegram(token, chat_id, "ℹ️ No tienes ninguna prenda en seguimiento para borrar.")
             return
 
         parts = clean_text.split()
         if len(parts) >= 2 and parts[1].isdigit():
             idx = int(parts[1]) - 1
-            if 0 <= idx < len(user_items):
-                target_item = user_items[idx]
-                if chat_id in target_item.get("chat_ids", []):
-                    target_item["chat_ids"].remove(chat_id)
-                if not target_item.get("chat_ids"):
-                    alerts = [x for x in alerts if x.get("id") != target_item.get("id")]
-                save_alerts(alerts)
-                send_telegram(token, chat_id, f"🗑️ Has dejado de seguir: <b>{target_item.get('name', 'Prenda')}</b> (Talla {target_item.get('size')}).")
+            success, target_item, remaining = delete_user_alert(chat_id, user_index=idx)
+            if success and target_item:
+                send_telegram(
+                    token, chat_id,
+                    f"🗑️ Has dejado de seguir: <b>{target_item.get('name', 'Prenda')}</b> (Talla {target_item.get('size')}).\n"
+                    f"Te quedan {remaining} prendas en seguimiento."
+                )
                 return
             else:
-                send_telegram(token, chat_id, f"⚠️ Número no válido. Tienes {len(user_items)} prendas en /list.")
+                send_telegram(token, chat_id, f"⚠️ Número no válido. Tienes {len(user_items)} prendas en tu lista (elige entre 1 y {len(user_items)}).")
                 return
 
-        # If no number specified, show list and set state
+        # If no number specified, show list with 1-tap delete buttons + prompt
         USER_STATES[chat_id] = {"state": "WAITING_FOR_DELETE", "timestamp": time.time()}
-        list_lines = ["📋 <b>¿Qué prenda quieres eliminar?</b>\n"]
+        list_lines = ["🗑️ <b>¿Qué prenda quieres eliminar?</b>\n"]
+        buttons = []
         for idx, item in enumerate(user_items, start=1):
-            list_lines.append(f"<b>{idx}.</b> [{item.get('store', '').upper()}] {item.get('name')} (Talla {item.get('size')})")
-        list_lines.append("\n<i>Responde simplemente con el número que quieras borrar (Ej: 1) o escribe /cancelar.</i>")
-        send_telegram(token, chat_id, "\n".join(list_lines))
+            s_name = item.get("store", "").upper()
+            i_name = item.get("name", "Prenda")
+            i_size = item.get("size", "")
+            list_lines.append(f"<b>{idx}.</b> [{s_name}] {i_name} (Talla {i_size})")
+
+            short_name = (i_name[:20] + "…") if len(i_name) > 20 else i_name
+            btn_text = f"🗑️ {idx}. {short_name} ({i_size})"
+            buttons.append([{"text": btn_text, "callback_data": f"del_{item.get('id')}"}])
+
+        buttons.append([{"text": "❌ Cancelar", "callback_data": "cancel_del"}])
+        list_lines.append("\n💡 <i>Toca un botón de abajo o responde con el número (Ej: 1) o escribe /cancelar.</i>")
+
+        send_telegram(token, chat_id, "\n".join(list_lines), reply_markup={"inline_keyboard": buttons})
         return
 
     # Intelligent Input Parsing (handles /add or direct text like 'pulandbear 07563305 XS')
@@ -601,7 +717,7 @@ def handle_telegram_message(token, chat_id, user_name, text):
         detected_store = store_checker.normalize_store(url_found) or "zara"
         if remaining_words:
             size = store_checker.normalize_size(remaining_words[0])
-            item, is_new = save_new_alert(alerts, detected_store, url_found, size, chat_id)
+            item, is_new = save_new_alert(detected_store, url_found, size, chat_id)
             send_telegram(
                 token, chat_id,
                 f"✅ <b>¡Alerta guardada con éxito!</b>\n\n"
@@ -633,7 +749,7 @@ def handle_telegram_message(token, chat_id, user_name, text):
         if len(rest) >= 2:
             ref = rest[0]
             size = store_checker.normalize_size(rest[1])
-            item, is_new = save_new_alert(alerts, potential_store, ref, size, chat_id)
+            item, is_new = save_new_alert(potential_store, ref, size, chat_id)
             send_telegram(
                 token, chat_id,
                 f"✅ <b>¡Alerta guardada con éxito!</b>\n\n"
@@ -707,13 +823,17 @@ def main():
 
                 try:
                     is_avail, price, name, status, final_url = store_checker.check_item_stock(driver, store, url, size)
-                    
-                    item["name"] = name
-                    item["price"] = price
-                    item["status"] = status
-                    item["url"] = final_url
-                    item["last_checked"] = now_str
-                    save_alerts(alerts)
+
+                    # Update status thread-safely in alerts.json
+                    # Crucial: update_item_status returns None if item was deleted by user during check
+                    updated_item = update_item_status(item_id, name, price, status, final_url, now_str)
+                    if not updated_item:
+                        logger.info(f"Prenda ID {item_id} fue eliminada durante la comprobación. No se notificará ni se restaurará.")
+                        continue
+
+                    chat_ids = updated_item.get("chat_ids", [])
+                    if not chat_ids:
+                        continue
 
                     logger.info(f"[{now_str}] [{store.upper()}] {name} ({size}) -> {status} ({price}) | Usuarios: {len(chat_ids)}")
 
